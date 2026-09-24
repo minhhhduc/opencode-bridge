@@ -9,6 +9,7 @@ import { readFile } from "node:fs/promises";
 import { resolve, dirname, join } from "node:path";
 import { doctor, formatDoctor } from "./doctor.js";
 import { auditManifest, formatAudit } from "./audit.js";
+import { loadCredentialProfiles, credentialStatus } from "./credentials.js";
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -24,6 +25,7 @@ function parseFlags(rest) {
 		else if (a === "--opencode-path") cfg.opencodePath = rest[++i];
 		else if (a === "--server") cfg.server = rest[++i];
 		else if (a === "--timeout") cfg.timeoutMs = Number(rest[++i]);
+		else if (a === "--profiles-file") cfg.profilesFile = rest[++i];
 		else positional.push(a);
 	}
 	return { cfg, json, positional };
@@ -46,6 +48,14 @@ async function main() {
 		console.log(json ? JSON.stringify(r, null, 2) : formatAudit(r));
 		process.exit(r.ok ? 0 : 1);
 	}
+	if (cmd === "keys") {
+		const file = cfg.profilesFile || process.env.OPENCODE_BRIDGE_PROFILES_FILE;
+		if (!file) return usage("keys requires --profiles-file or OPENCODE_BRIDGE_PROFILES_FILE");
+		const profiles = loadCredentialProfiles(file);
+		const rows = credentialStatus(profiles);
+		console.log(json ? JSON.stringify(rows, null, 2) : rows.map(({ providerID, id, status }) => `${providerID}/${id}\t${status}`).join("\n"));
+		return;
+	}
 
 	return usage();
 }
@@ -65,7 +75,7 @@ async function loadManifest(path) {
 
 function usage(msg) {
 	if (msg) console.error(`error: ${msg}\n`);
-	console.error("usage: omp-opencode-bridge <doctor|plugin-audit <path>> [--json] [--opencode-path P] [--server URL] [--timeout MS]");
+	console.error("usage: omp-opencode-bridge <doctor|plugin-audit <path>|keys> [--json] [--profiles-file FILE] [--opencode-path P] [--server URL] [--timeout MS]");
 	process.exit(2);
 }
 

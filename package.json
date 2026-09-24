@@ -4,10 +4,18 @@
   "description": "Bridge OpenCode models/providers into OMP as a dynamic provider, plus external-plugin manifest validation and capability auditing.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=20" },
-  "bin": { "omp-opencode-bridge": "src/cli.js" },
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "omp-opencode-bridge": "src/cli.js"
+  },
   "main": "src/extension.js",
-  "files": ["src", "README.md", "DESIGN.md"],
+  "files": [
+    "src",
+    "README.md",
+    "DESIGN.md"
+  ],
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
     "doctor": "node src/cli.js doctor"
@@ -16,8 +24,12 @@
     "name": "opencode-bridge",
     "version": "1.0.0",
     "description": "Discover and use OpenCode models from OMP; audit external plugins.",
-    "extensions": ["src/extension.js"],
-    "commands": ["src/cli.js"],
+    "extensions": [
+      "src/extension.js"
+    ],
+    "commands": [
+      "src/cli.js"
+    ],
     "settings": {
       "enabled": {
         "type": "boolean",
@@ -33,6 +45,11 @@
         "type": "string",
         "description": "Explicit OpenCode server URL (overrides `opencode service status` autodiscovery).",
         "env": "OPENCODE_SERVER"
+      },
+      "profilesFile": {
+        "type": "string",
+        "description": "Path to a YAML profile configuration containing environment variable references only.",
+        "env": "OPENCODE_BRIDGE_PROFILES_FILE"
       },
       "discovery": {
         "type": "boolean",
@@ -53,5 +70,15 @@
       }
     }
   },
-  "keywords": ["omp", "oh-my-pi", "opencode", "provider", "plugin", "bridge"]
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "opencode",
+    "provider",
+    "plugin",
+    "bridge"
+  ],
+  "dependencies": {
+    "yaml": "^2.9.1"
+  }
 }

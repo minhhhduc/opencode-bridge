@@ -47,6 +47,7 @@ Any request OpenCode cannot honor becomes a `CapabilityError` / stream `error` e
 - Node.js ≥ 20
 - OMP (to use the provider) — the audit CLI works standalone.
 - OpenCode on `PATH` (or set `OPENCODE_BIN`) with at least one authenticated provider, for live model discovery/inference.
+- OpenCode 2.x for plugin-managed credential profiles (verified with 2.0.12).
 
 ## Install
 
@@ -81,6 +82,59 @@ Settings live under the plugin's `omp.settings` (configure via OMP's plugin sett
 | `discovery`    | boolean | `true`  |                  | Dynamically discover OpenCode providers/models. |
 | `inference`    | boolean | `true`  |                  | Forward inference through the session API. |
 | `timeoutMs`    | number  | `30000` |                  | Per-request timeout for OpenCode CLI/API calls. |
+| `profilesFile` | string  | unset   | `OPENCODE_BRIDGE_PROFILES_FILE` | YAML file containing provider-scoped credential profile IDs and environment variable names. |
+
+### Multiple API keys for one OpenCode provider
+
+Edit the local `opencode-bridge.profiles.yml` (gitignored by this repo). It contains **references**, not key values:
+
+```yaml
+providers:
+  opencode:
+    credentials:
+      - id: account1
+        apiKeyEnv: OPENCODE_KEY_1
+      - id: account2
+        apiKeyEnv: OPENCODE_KEY_2
+      - id: account3
+        apiKeyEnv: OPENCODE_KEY_3
+```
+
+Set the three environment variables in the process that launches OMP, and set
+`OPENCODE_BRIDGE_PROFILES_FILE` to the absolute path of this YAML file (or set
+`profilesFile` in the plugin settings). Restart OMP, then run `omp models refresh`.
+For example, a dynamically discovered `opencode/gpt-5.6-sol` becomes:
+
+```
+opencode-bridge/opencode/gpt-5.6-sol@account1
+opencode-bridge/opencode/gpt-5.6-sol@account2
+opencode-bridge/opencode/gpt-5.6-sol@account3
+```
+
+The suffix selects the credential and is removed before calling OpenCode; the
+upstream model remains `opencode/gpt-5.6-sol`. Characters such as `@`, `%`, and
+`/` in upstream model IDs are URL-encoded in profiled OMP IDs so IDs cannot
+collide. Providers without profiles retain their existing OMP IDs and auth.
+
+For a quick, non-secret status check:
+
+```
+omp-opencode-bridge keys --profiles-file ./opencode-bridge.profiles.yml
+```
+
+Each active profile starts one private OpenCode 2 server on loopback, reused for
+later requests. The bridge sets that server's `providers.<provider>.settings.apiKey`
+to an environment reference and removes inherited credential environment
+variables before passing the selected profile key. It isolates OpenCode's
+data/config directory per process and protects the local
+server with a random password. This requires a key-based OpenCode provider that
+honors `settings.apiKey`; OAuth or multi-field cloud credentials are outside this
+feature. A profile key is read when its server starts, so restart OMP after
+changing it. Manual selection is supported; automatic key fallback is not.
+
+The plugin also accepts a `providers` object directly in `pi.settings` when the
+OMP host exposes structured plugin settings. `profilesFile` is the portable
+configuration path.
 
 ### Add a URL/API provider through OpenCode
 

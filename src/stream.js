@@ -33,13 +33,13 @@ export class CapabilityError extends Error {
  * `model: { providerID, id }` — `session.prompt` has no model field, and its
  * body accepts only `text` (plus files/agents/skills/metadata/delivery/resume).
  */
-export function mapRequest(model, context, options = {}) {
+export function mapRequest(model, context, options = {}, descriptor = null) {
 	// OMP model ids arrive either as `<providerID>/<modelID>` or, when the
 	// registered-provider prefix is still attached, `opencode-bridge/<providerID>/<modelID>`.
 	// Strip the bridge prefix if present; what remains is the pair OpenCode expects.
-	const rest = String(model.id).replace(/^opencode-bridge\//, "").split("/");
-	const providerID = rest[0];
-	const modelID = rest.slice(1).join("/");
+	const rest = descriptor ? null : String(model.id).replace(/^opencode-bridge\//, "").split("/");
+	const providerID = descriptor?.providerID || rest[0];
+	const modelID = descriptor?.modelID || rest.slice(1).join("/");
 	if (!providerID || !modelID) {
 		throw new CapabilityError(`model id must be <provider>/<model>, got "${model.id}"`);
 	}
@@ -128,10 +128,10 @@ function hasImages(messages) {
  * ordered event stream; each block gets its own contentIndex in `partial.content`
  * exactly as OMP's own assemblers do (read from omp.exe).
  */
-export async function runStreaming(client, mapped, { signal, timeoutMs = 120000, partial, onEvent } = {}) {
+export async function runStreaming(client, mapped, { signal, timeoutMs = 120000, partial, onEvent, sanitize = (s) => s } = {}) {
 	const { sessionBody, promptBody } = mapped;
 	const { openEventStream } = await import("./sse.js");
-	const s = new Transcript(onEvent, partial);
+	const s = new Transcript(onEvent, partial, sanitize);
 
 	// 1. Create the session first, so we know which sessionID to filter events for.
 	const created = await client.api("session.create", { signal, data: sessionBody });
@@ -174,8 +174,9 @@ export async function runStreaming(client, mapped, { signal, timeoutMs = 120000,
  * each carrying `{contentIndex, partial}`).
  */
 class Transcript {
-	constructor(emit, partial) {
+	constructor(emit, partial, sanitize) {
 		this.emit = emit || (() => {});
+		this.sanitize = sanitize;
 		this.text = "";
 		this.thinking = "";
 		this.finish = null;
@@ -269,7 +270,7 @@ class Transcript {
 					this.emit({ type: "done", reason: this.partial.stopReason, message: this.partial, usage: this.partial.usage });
 					return this.finishUp();
 				case "session.execution.failed":
-					this.emit({ type: "error", reason: "error", error: errMessage(String(d.error?.message || d.error || "OpenCode execution failed")) });
+					this.emit({ type: "error", reason: "error", error: errMessage(this.sanitize(String(d.error?.message || d.error || "OpenCode execution failed"))) });
 					return this.finishUp();
 				case "session.execution.interrupted":
 					this.emit({ type: "error", reason: "aborted", error: errMessage("OpenCode execution interrupted") });
@@ -477,7 +478,7 @@ export class EventStream {
  * Every failure path becomes an `error` stream event, so a bridge fault can
  * never crash OMP or masquerade as a successful empty answer.
  */
-export function makeStreamSimple(client, StreamCtor = EventStream, { inference = true, streaming = true, timeoutMs = 120000 } = {}) {
+export function makeStreamSimple(client, StreamCtor = EventStream, { inference = true, streaming = true, timeoutMs = 120000, resolveModel, resolveClient, sanitize = (s) => s } = {}) {
 	return function streamSimple(model, context, options = {}) {
 		const stream = new StreamCtor();
 		(async () => {
@@ -487,19 +488,22 @@ export function makeStreamSimple(client, StreamCtor = EventStream, { inference =
 			const partial = { role: "assistant", content: [], usage: zeroUsage() };
 			try {
 				if (!inference) throw new CapabilityError("OpenCode inference is disabled (opencode.inference=false)", { capability: "inference" });
-				const mapped = mapRequest(model, context, options);
+				const descriptor = resolveModel?.(model) || null;
+				const mapped = mapRequest(model, context, options, descriptor);
 				if (mapped.unsupported.length) {
 					throw new CapabilityError(`OpenCode cannot honor: ${mapped.unsupported.join(", ")}`, { capability: mapped.unsupported[0] });
 				}
 				stream.push({ type: "start", partial });
+				const selectedClient = descriptor ? await resolveClient(descriptor) : client;
 
-				if (streaming && client.streamingSupported !== false) {
+				if (streaming && selectedClient.streamingSupported !== false) {
 					try {
-						const result = await runStreaming(client, mapped, {
+						const result = await runStreaming(selectedClient, mapped, {
 							signal: options.signal,
 							timeoutMs,
 							partial,
 							onEvent: (e) => stream.push(e),
+							sanitize,
 						});
 						stream.end({ usage: result.usage });
 						return;
@@ -512,13 +516,13 @@ export function makeStreamSimple(client, StreamCtor = EventStream, { inference =
 					}
 				}
 
-				const result = await runBuffered(client, mapped, { signal: options.signal, partial, onEvent: (e) => stream.push(e) });
+				const result = await runBuffered(selectedClient, mapped, { signal: options.signal, partial, onEvent: (e) => stream.push(e) });
 				stream.end({ usage: result.usage });
 			} catch (err) {
 				const reason = /abort/i.test(String(err?.message)) ? "aborted" : "error";
 				// Same message contract as the success path: OMP's error handler also
 				// walks usage.cost.total.
-				try { stream.push({ type: "error", reason, error: errMessage(String(err?.message || err)) }); } catch {}
+				try { stream.push({ type: "error", reason, error: errMessage(sanitize(String(err?.message || err))) }); } catch {}
 				stream.end();
 			}
 		})();

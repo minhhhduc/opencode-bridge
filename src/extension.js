@@ -16,12 +16,27 @@
 
 import { OpenCodeClient } from "./opencode.js";
 import { makeStreamSimple } from "./stream.js";
+import { credentialProfiles, expandModels, resolveProfileModel, loadCredentialProfiles } from "./credentials.js";
+import { OpenCodeClientPool } from "./client-pool.js";
 
 export default function activate(pi) {
 	const cfg = readSettings(pi);
 	if (cfg.enabled === false) return;
 
 	const client = new OpenCodeClient(cfg);
+	// A bad profile file must not take the provider down: profiles are opt-in on
+	// top of the pre-existing single-credential path. Warn loudly, then keep the
+	// unprofiled bridge working instead of unregistering it.
+	let profiles = new Map();
+	try {
+		profiles = cfg.profilesFile ? loadCredentialProfiles(cfg.profilesFile) : credentialProfiles(cfg.providers);
+	} catch (e) {
+		(pi?.logger?.warn ?? pi?.log?.warn)?.(
+			`opencode-bridge: invalid credential profile configuration, continuing without profiles: ${e.message}`,
+		);
+	}
+	const pool = new OpenCodeClientPool(cfg, profiles);
+	let descriptors = new Map();
 
 	const provider = {
 		api: "opencode-session",
@@ -33,7 +48,10 @@ export default function activate(pi) {
 		async fetchDynamicModels() {
 			if (cfg.discovery === false) return [];
 			try {
-				return await client.discoverModels();
+				const found = await client.discoverModels();
+				const expanded = expandModels(found, profiles);
+				descriptors = expanded.descriptors;
+				return expanded.models;
 			} catch {
 				return [];
 			}
@@ -43,7 +61,12 @@ export default function activate(pi) {
 	if (cfg.inference !== false) {
 		// OMP does not hand extensions its own stream class, so makeStreamSimple
 		// falls back to the minimal EventStream in stream.js.
-		provider.streamSimple = makeStreamSimple(client, undefined, { inference: true });
+		provider.streamSimple = makeStreamSimple(client, undefined, {
+			inference: true,
+			resolveModel: (model) => resolveProfileModel(model, descriptors, profiles),
+			resolveClient: (descriptor) => pool.get(descriptor),
+			sanitize: (message) => pool.sanitize(message),
+		});
 	}
 
 	try {
@@ -68,6 +91,8 @@ function readSettings(pi) {
 		enabled: get("enabled", true),
 		opencodePath: get("opencodePath", undefined),
 		server: get("server", undefined),
+		providers: get("providers", {}),
+		profilesFile: get("profilesFile", process.env.OPENCODE_BRIDGE_PROFILES_FILE),
 		discovery: get("discovery", true),
 		inference: get("inference", true),
 		timeoutMs: get("timeoutMs", 30000),

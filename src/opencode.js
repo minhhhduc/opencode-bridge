@@ -62,7 +62,7 @@ function canSpawn(bin) {
  * abort so no orphan OpenCode process survives.
  * @returns {Promise<{code:number, stdout:string, stderr:string}>}
  */
-export function run(bin, args, { signal, timeoutMs = 30000, input } = {}) {
+export function run(bin, args, { signal, timeoutMs = 30000, input, env } = {}) {
 	return new Promise((resolve, reject) => {
 		let child;
 		let spawnBin = bin;
@@ -74,7 +74,7 @@ export function run(bin, args, { signal, timeoutMs = 30000, input } = {}) {
 			spawnArgs = ["/d", "/s", "/c", bin, ...args];
 		}
 		try {
-			child = spawn(spawnBin, spawnArgs, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+			child = spawn(spawnBin, spawnArgs, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env });
 		} catch (e) {
 			return reject(wrapSpawnError(e, bin));
 		}
@@ -121,12 +121,13 @@ export class OpenCodeClient {
 		this.cfg = cfg;
 		this.bin = resolveBin(cfg);
 		this.timeoutMs = cfg.timeoutMs ?? 30000;
+		this.childEnv = cfg.childEnv;
 	}
 
 	/** True if the opencode binary is invocable. */
 	async detect(signal) {
 		try {
-			const r = await run(this.bin, ["--version"], { signal, timeoutMs: this.timeoutMs });
+			const r = await run(this.bin, ["--version"], { signal, timeoutMs: this.timeoutMs, env: this.childEnv });
 			return r.code === 0;
 		} catch (e) {
 			if (e instanceof OpenCodeNotInstalledError) return false;
@@ -135,7 +136,7 @@ export class OpenCodeClient {
 	}
 
 	async version(signal) {
-		const r = await run(this.bin, ["--version"], { signal, timeoutMs: this.timeoutMs });
+		const r = await run(this.bin, ["--version"], { signal, timeoutMs: this.timeoutMs, env: this.childEnv });
 		// e.g. "opencode v2.0.12"
 		const m = r.stdout.match(/v?(\d+\.\d+\.\d+[\w.-]*)/);
 		return m ? m[1] : r.stdout.trim() || null;
@@ -183,7 +184,7 @@ export class OpenCodeClient {
 		}
 		if (data != null) args.push("-d", typeof data === "string" ? data : JSON.stringify(data));
 		for (const [k, v] of Object.entries(params || {})) args.push("--param", `${k}=${v}`);
-		const r = await run(this.bin, args, { signal, timeoutMs: timeoutMs ?? this.timeoutMs });
+		const r = await run(this.bin, args, { signal, timeoutMs: timeoutMs ?? this.timeoutMs, env: this.childEnv });
 		if (r.code !== 0) {
 			throw new OpenCodeError(`opencode api ${operation} failed (exit ${r.code}): ${redactText(r.stderr || r.stdout).slice(0, 400)}`);
 		}
@@ -364,5 +365,3 @@ export function parseModelsTable(text) {
 	}
 	return out;
 }
-
-

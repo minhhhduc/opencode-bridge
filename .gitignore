@@ -10,6 +10,8 @@ yarn-error.log*
 # Local secrets and environment
 .env
 .env.*
+opencode-bridge.profiles.json
+opencode-bridge.profiles.yml
 !.env.example
 
 # Logs and local runtime state
