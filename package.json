@@ -1,0 +1,57 @@
+{
+  "name": "omp-opencode-bridge",
+  "version": "1.0.0",
+  "description": "Bridge OpenCode models/providers into OMP as a dynamic provider, plus external-plugin manifest validation and capability auditing.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "bin": { "omp-opencode-bridge": "src/cli.js" },
+  "main": "src/extension.js",
+  "files": ["src", "README.md", "DESIGN.md"],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "doctor": "node src/cli.js doctor"
+  },
+  "omp": {
+    "name": "opencode-bridge",
+    "version": "1.0.0",
+    "description": "Discover and use OpenCode models from OMP; audit external plugins.",
+    "extensions": ["src/extension.js"],
+    "commands": ["src/cli.js"],
+    "settings": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Register the opencode provider on startup."
+      },
+      "opencodePath": {
+        "type": "string",
+        "description": "Path to the opencode executable. Auto-detected on PATH when unset.",
+        "env": "OPENCODE_BIN"
+      },
+      "server": {
+        "type": "string",
+        "description": "Explicit OpenCode server URL (overrides `opencode service status` autodiscovery).",
+        "env": "OPENCODE_SERVER"
+      },
+      "discovery": {
+        "type": "boolean",
+        "default": true,
+        "description": "Dynamically discover OpenCode providers/models."
+      },
+      "inference": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable inference forwarding through OpenCode's session API (bounded capability; see README)."
+      },
+      "timeoutMs": {
+        "type": "number",
+        "default": 30000,
+        "min": 1000,
+        "max": 600000,
+        "description": "Per-request timeout for OpenCode CLI/API calls."
+      }
+    }
+  },
+  "keywords": ["omp", "oh-my-pi", "opencode", "provider", "plugin", "bridge"]
+}
