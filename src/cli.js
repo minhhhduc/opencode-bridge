@@ -6,10 +6,11 @@
 // Exit codes: 0 ok, 1 audit blocked / doctor found no OpenCode, 2 usage error.
 
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { doctor, formatDoctor } from "./doctor.js";
 import { auditManifest, formatAudit } from "./audit.js";
-import { loadCredentialProfiles, credentialStatus } from "./credentials.js";
+import { loadCredentialProfiles, credentialStatus, resolveProfilesFile } from "./credentials.js";
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -49,8 +50,11 @@ async function main() {
 		process.exit(r.ok ? 0 : 1);
 	}
 	if (cmd === "keys") {
-		const file = cfg.profilesFile || process.env.OPENCODE_BRIDGE_PROFILES_FILE;
-		if (!file) return usage("keys requires --profiles-file or OPENCODE_BRIDGE_PROFILES_FILE");
+		const file = resolveProfilesFile(cfg.profilesFile);
+		if (!existsSync(file)) {
+			console.error(`no profile file at ${file}\ncreate it, or pass --profiles-file PATH`);
+			process.exit(2);
+		}
 		const profiles = loadCredentialProfiles(file);
 		const rows = credentialStatus(profiles);
 		console.log(json ? JSON.stringify(rows, null, 2) : rows.map(({ providerID, id, status }) => `${providerID}/${id}\t${status}`).join("\n"));

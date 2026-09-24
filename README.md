@@ -86,8 +86,9 @@ Settings live under the plugin's `omp.settings` (configure via OMP's plugin sett
 
 ### Multiple API keys for one OpenCode provider
 
-Edit the local `opencode-bridge.profiles.yml` (gitignored by this repo). Put the
-key straight in the file:
+Edit `opencode-bridge.profiles.yml`. It lives beside the **installed** plugin (or
+in `~/.omp`), not in a source checkout, so updating or reinstalling keeps your
+keys. Put the key straight in the file:
 
 ```yaml
 providers:
@@ -99,8 +100,9 @@ providers:
         apiKey: oc_sk_...
 ```
 
-Set `OPENCODE_BRIDGE_PROFILES_FILE` to the absolute path of this YAML file (or set
-`profilesFile` in the plugin settings). Restart OMP, then run `omp models refresh`.
+Nothing else is needed: the plugin finds that file on its own. Set
+`profilesFile` in the plugin settings (or `OPENCODE_BRIDGE_PROFILES_FILE`) only to
+point somewhere else. Restart OMP, then run `omp models refresh`.
 For example, a dynamically discovered `opencode/gpt-5.6-sol` becomes:
 
 ```
@@ -117,7 +119,7 @@ collide. Providers without profiles retain their existing OMP IDs and auth.
 For a quick, non-secret status check:
 
 ```
-omp-opencode-bridge keys --profiles-file ./opencode-bridge.profiles.yml
+omp-opencode-bridge keys
 ```
 
 Each active profile starts one private OpenCode 2 server on loopback, reused for

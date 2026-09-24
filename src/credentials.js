@@ -2,11 +2,36 @@
 // profile file) or by environment variable reference (`apiKeyEnv`). Nothing is
 // hardcoded in source; both forms end up in the same {id, …} shape.
 import { CapabilityError } from "./stream.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { parse } from "yaml";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const ENV = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export const PROFILE_FILENAME = "opencode-bridge.profiles.yml";
+
+/**
+ * Where the profile file lives, in priority order:
+ *   1. explicit config / OPENCODE_BRIDGE_PROFILES_FILE — always wins;
+ *   2. next to the installed plugin (so a `omp plugin install` owns its config);
+ *   3. the user's OMP home (~/.omp), which survives reinstalling the plugin;
+ *   4. the current directory, for running from a checkout.
+ * The first three exist-or-defaults without throwing, so a fresh install works
+ * before the user has written anything.
+ */
+export function resolveProfilesFile(explicit, env = process.env) {
+	if (explicit) return explicit;
+	if (env.OPENCODE_BRIDGE_PROFILES_FILE) return env.OPENCODE_BRIDGE_PROFILES_FILE;
+	for (const dir of [env.OMP_PLUGIN_ROOT, join(homedir(), ".omp"), process.cwd()]) {
+		if (!dir) continue;
+		const file = join(dir, PROFILE_FILENAME);
+		if (existsSync(file)) return file;
+	}
+	// Nothing exists yet: the install location is where a new file belongs.
+	return join(env.OMP_PLUGIN_ROOT || join(homedir(), ".omp"), PROFILE_FILENAME);
+}
 
 export function loadCredentialProfiles(file) {
 	const contents = readFileSync(file, "utf8");

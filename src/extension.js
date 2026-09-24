@@ -16,7 +16,7 @@
 
 import { OpenCodeClient } from "./opencode.js";
 import { makeStreamSimple } from "./stream.js";
-import { credentialProfiles, expandModels, resolveProfileModel, loadCredentialProfiles } from "./credentials.js";
+import { credentialProfiles, expandModels, resolveProfileModel, loadCredentialProfiles, resolveProfilesFile } from "./credentials.js";
 import { OpenCodeClientPool } from "./client-pool.js";
 
 export default function activate(pi) {
@@ -26,14 +26,21 @@ export default function activate(pi) {
 	const client = new OpenCodeClient(cfg);
 	// A bad profile file must not take the provider down: profiles are opt-in on
 	// top of the pre-existing single-credential path. Warn loudly, then keep the
-	// unprofiled bridge working instead of unregistering it.
+	// unprofiled bridge working instead of unregistering it. A missing file is
+	// simply "not configured yet" — that is the normal state of a fresh install.
 	let profiles = new Map();
 	try {
-		profiles = cfg.profilesFile ? loadCredentialProfiles(cfg.profilesFile) : credentialProfiles(cfg.providers);
+		profiles = cfg.profilesFile === false
+			? credentialProfiles(cfg.providers)
+			: loadCredentialProfiles(resolveProfilesFile(cfg.profilesFile));
 	} catch (e) {
-		(pi?.logger?.warn ?? pi?.log?.warn)?.(
-			`opencode-bridge: invalid credential profile configuration, continuing without profiles: ${e.message}`,
-		);
+		if (e?.code === "ENOENT") {
+			// nothing to load; the unprofiled bridge still works
+		} else {
+			(pi?.logger?.warn ?? pi?.log?.warn)?.(
+				`opencode-bridge: invalid credential profile configuration, continuing without profiles: ${e.message}`,
+			);
+		}
 	}
 	const pool = new OpenCodeClientPool(cfg, profiles);
 	let descriptors = new Map();
@@ -92,7 +99,9 @@ function readSettings(pi) {
 		opencodePath: get("opencodePath", undefined),
 		server: get("server", undefined),
 		providers: get("providers", {}),
-		profilesFile: get("profilesFile", process.env.OPENCODE_BRIDGE_PROFILES_FILE),
+		// undefined → resolveProfilesFile finds the installed-plugin / ~/.omp copy.
+		// false → profiles explicitly disabled for this session.
+		profilesFile: get("profilesFile", undefined),
 		discovery: get("discovery", true),
 		inference: get("inference", true),
 		timeoutMs: get("timeoutMs", 30000),

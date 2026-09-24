@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentialProfiles, expandModels, parseProfileModelId, resolveProfileModel, credentialStatus, loadCredentialProfiles } from "../src/credentials.js";
@@ -226,27 +226,69 @@ test("malformed YAML profile file is rejected", () => {
 	finally { unlinkSync(file); rmdirSync(dir); }
 });
 
-// Regression: a bad profile file used to `return` from activate(), which left
+// The profile file belongs to the *installed plugin*, not to a source checkout:
+// a user who reinstalls or updates must not lose their keys, and a checkout must
+// not carry them at all.
+test("profile file resolves to the install, not the repo", async () => {
+	const { resolveProfilesFile, PROFILE_FILENAME } = await import("../src/credentials.js");
+	const dir = mkdtempSync(join(tmpdir(), "omp-resolve-"));
+	const pluginRoot = join(dir, "plugin");
+	mkdirSync(pluginRoot);
+	writeFileSync(join(pluginRoot, PROFILE_FILENAME), "providers: {}\n");
+	const old = process.env.OMP_PLUGIN_ROOT;
+	try {
+		process.env.OMP_PLUGIN_ROOT = pluginRoot;
+		// Explicit config always wins.
+		assert.equal(resolveProfilesFile("/explicit/path.yml"), "/explicit/path.yml");
+		// With nothing explicit, the installed plugin's copy is used.
+		assert.equal(resolveProfilesFile(undefined), join(pluginRoot, PROFILE_FILENAME));
+	} finally {
+		if (old === undefined) delete process.env.OMP_PLUGIN_ROOT; else process.env.OMP_PLUGIN_ROOT = old;
+		unlinkSync(join(pluginRoot, PROFILE_FILENAME));
+		rmdirSync(pluginRoot);
+		rmdirSync(dir);
+	}
+});
+
+// Regression: a fresh install has no profile file. That is "not configured yet",
+// not a broken config — the unprofiled bridge must still register.
+test("a missing profile file leaves the bridge working", async () => {
+	const { default: activate } = await import("../src/extension.js");
+	const dir = mkdtempSync(join(tmpdir(), "omp-missing-"));
+	const old = process.env.OMP_PLUGIN_ROOT;
+	try {
+		process.env.OMP_PLUGIN_ROOT = dir; // exists, but has no profiles file
+		const registered = [];
+		const warnings = [];
+		activate({ settings: {}, registerProvider: (n) => registered.push(n), logger: { warn: (m) => warnings.push(m) } });
+		assert.deepEqual(registered, ["opencode-bridge"]);
+		assert.deepEqual(warnings, [], "a missing file is not a config error");
+	} finally {
+		if (old === undefined) delete process.env.OMP_PLUGIN_ROOT; else process.env.OMP_PLUGIN_ROOT = old;
+		rmdirSync(dir);
+	}
+});
+
 // the whole provider unregistered — the previously working unprofiled bridge
 // disappeared from OMP's model list. Profiles are opt-in; losing them must not
 // cost the user the bridge.
 test("invalid profile config keeps the bridge provider registered", async () => {
 	const { default: activate } = await import("../src/extension.js");
-	for (const settings of [
-		{ profilesFile: join(tmpdir(), "omp-does-not-exist-profiles.yml") },
-		{ profilesFile: "not-a-real-dir/nope.yml" },
-	]) {
+	const dir = mkdtempSync(join(tmpdir(), "omp-badcfg-"));
+	const file = join(dir, "broken.yml");
+	writeFileSync(file, "providers:\n  opencode: [broken\n");
+	try {
 		const registered = [];
 		const warnings = [];
 		activate({
-			settings,
+			settings: { profilesFile: file },
 			registerProvider: (name) => registered.push(name),
 			logger: { warn: (m) => warnings.push(m) },
 		});
-		assert.deepEqual(registered, ["opencode-bridge"], `provider dropped for ${JSON.stringify(settings)}`);
+		assert.deepEqual(registered, ["opencode-bridge"], "a broken config must not unregister the provider");
 		assert.equal(warnings.length, 1);
 		assert.match(warnings[0], /continuing without profiles/);
-	}
+	} finally { unlinkSync(file); rmdirSync(dir); }
 });
 
 // Regression: an exported-but-malformed OPENCODE_CONFIG_CONTENT used to throw
