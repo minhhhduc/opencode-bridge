@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Package artifacts
+*.tgz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+
+# Logs and local runtime state
+*.log
+*.sqlite
+*.sqlite3
+*.db
+mkacp.py
+*.db3
+coverage/
+.claude/
+tmp/
+temp/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local OpenCode captures and experiment files
+oc_openapi.json
+oc_strings.txt
+acp*.jsonl
+acp*_in.txt
+acp*_out.txt
+sid.txt
