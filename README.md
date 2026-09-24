@@ -70,6 +70,35 @@ npm install -g omp-opencode-bridge
 omp-opencode-bridge doctor
 ```
 
+### First run
+
+Installing is all the setup there is. On first start the bridge creates
+`opencode-bridge.profiles.yml` next to the installed plugin (or in `~/.omp`) with
+your keys to fill in — nothing else to configure, no environment variables:
+
+```
+providers:
+  opencode:
+    credentials:
+      - id: account1
+        apiKey: sk-replace-me
+```
+
+Add one entry per API key, then restart OMP and run `omp models refresh`. Every
+discovered model is then offered once per profile, e.g.
+`opencode-bridge/opencode/space-bunny-free@account1`.
+
+Check what it found without exposing any key:
+
+```
+omp-opencode-bridge keys      # → opencode/account1  configured
+```
+
+Keys may also be omitted from the file and taken from the environment with
+`apiKeyEnv: OPENCODE_KEY_1` instead. The file is only ever written if it does not
+already exist, and an unwritable install directory is not an error — the bridge
+runs unprofiled.
+
 ## Configuration
 
 Settings live under the plugin's `omp.settings` (configure via OMP's plugin settings UI/file). Env vars override where noted.

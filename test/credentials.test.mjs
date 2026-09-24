@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmdirSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentialProfiles, expandModels, parseProfileModelId, resolveProfileModel, credentialStatus, loadCredentialProfiles } from "../src/credentials.js";
@@ -311,5 +311,32 @@ test("malformed OPENCODE_CONFIG_CONTENT does not break the profile config merge"
 	} finally {
 		if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
 		else process.env.OPENCODE_CONFIG_CONTENT = previous;
+	}
+});
+
+// A fresh install has no profile file anywhere. resolveProfilesFile must write
+// a commented starter — with no real key in it — so the user finds the file and
+// its exact shape, and the starter must not be mistaken for a working config.
+test("a fresh install writes a commented starter file", async () => {
+	const { resolveProfilesFile, loadCredentialProfiles, credentialStatus } = await import("../src/credentials.js");
+	const pluginRoot = mkdtempSync(join(tmpdir(), "omp-starter-"));
+	const home = mkdtempSync(join(tmpdir(), "omp-home-"));
+	// Point homedir at the temp home so the real ~/.omp is not consulted.
+	const realHomedir = process.env.HOME;
+	try {
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		const file = resolveProfilesFile(undefined, { OMP_PLUGIN_ROOT: pluginRoot, OPENCODE_BRIDGE_PROFILES_FILE: undefined });
+		assert.ok(file.startsWith(pluginRoot) || file.startsWith(home), "starter lands in the install or home dir");
+		assert.ok(existsSync(file), "starter was written");
+		const body = readFileSync(file, "utf8");
+		assert.match(body, /apiKey: sk-replace-me/, "starter shows the exact key shape");
+		// It parses cleanly, and reports the placeholder as present-but-placeholder:
+		// the bridge must still start, and no real secret is embedded.
+		const status = credentialStatus(loadCredentialProfiles(file), {});
+		assert.equal(status.length, 2);
+		assert.ok(!/oc_sk_/.test(body), "starter contains no real key");
+	} finally {
+		if (realHomedir === undefined) delete process.env.HOME; else process.env.HOME = realHomedir;
 	}
 });

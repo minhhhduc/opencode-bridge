@@ -2,7 +2,7 @@
 // profile file) or by environment variable reference (`apiKeyEnv`). Nothing is
 // hardcoded in source; both forms end up in the same {id, …} shape.
 import { CapabilityError } from "./stream.js";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
@@ -18,8 +18,9 @@ export const PROFILE_FILENAME = "opencode-bridge.profiles.yml";
  *   2. next to the installed plugin (so a `omp plugin install` owns its config);
  *   3. the user's OMP home (~/.omp), which survives reinstalling the plugin;
  *   4. the current directory, for running from a checkout.
- * The first three exist-or-defaults without throwing, so a fresh install works
- * before the user has written anything.
+ * When nothing exists yet a commented starter file is written, so a fresh
+ * install tells the user where to put their keys instead of silently doing
+ * nothing. A write failure is never fatal — the bridge still works unprofiled.
  */
 export function resolveProfilesFile(explicit, env = process.env) {
 	if (explicit) return explicit;
@@ -29,9 +30,33 @@ export function resolveProfilesFile(explicit, env = process.env) {
 		const file = join(dir, PROFILE_FILENAME);
 		if (existsSync(file)) return file;
 	}
-	// Nothing exists yet: the install location is where a new file belongs.
-	return join(env.OMP_PLUGIN_ROOT || join(homedir(), ".omp"), PROFILE_FILENAME);
+	// Nothing exists yet: write a commented starter at the install location, so
+	// the user finds the file and the exact shape without reading the README.
+	const target = join(env.OMP_PLUGIN_ROOT || join(homedir(), ".omp"), PROFILE_FILENAME);
+	try {
+		writeFileSync(target, STARTER, { flag: "wx" });
+	} catch {
+		// Unwritable install dir (read-only, no perms) — not fatal, the bridge
+		// just runs unprofiled and the user can set OPENCODE_BRIDGE_PROFILES_FILE.
+	}
+	return target;
 }
+
+const STARTER = `# opencode-bridge credential profiles.
+# One profile = one API key = one isolated OpenCode server, so concurrent
+# requests on different accounts never share a credential. Add as many as you
+# like; each discovered model is then offered once per profile as
+# \`opencode-bridge/<provider>/<model>@<id>\`.
+#
+# Fill in the keys below, then restart OMP and run \`omp models refresh\`.
+providers:
+  opencode:
+    credentials:
+      - id: account1
+        apiKey: sk-replace-me
+      - id: account2
+        apiKey: sk-replace-me
+`;
 
 export function loadCredentialProfiles(file) {
 	const contents = readFileSync(file, "utf8");
