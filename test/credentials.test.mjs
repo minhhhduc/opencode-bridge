@@ -55,6 +55,36 @@ test("descriptor resolves cached OMP model and strips credential from upstream I
 	assert.throws(() => parseProfileModelId("opencode/model%ZZ@account1"), /encoded/);
 });
 
+// Regression: OMP caches dynamic model configs for 24h, so a user who adds
+// profiles still has pre-upgrade, un-suffixed ids in the cache. Those used to
+// throw "invalid credential model ID", breaking every previously-working model
+// until a manual `omp models refresh`. An optional feature must not do that.
+test("pre-upgrade cached model IDs still resolve to the default client", () => {
+	const profiles = credentialProfiles(config);
+	for (const id of ["opencode/gpt-5.6-sol", "opencode-bridge/opencode/gpt-5.6-sol"]) {
+		assert.equal(resolveProfileModel({ id }, new Map(), profiles), null, `${id} must fall back, not throw`);
+	}
+	// …and it must still work end-to-end, on the old unprofiled path.
+	const mapped = mapRequest({ id: "opencode-bridge/opencode/gpt-5.6-sol" }, { messages: [{ role: "user", content: "hi" }] });
+	assert.deepEqual(mapped.sessionBody.model, { providerID: "opencode", id: "gpt-5.6-sol" });
+});
+
+// Regression: a duplicate upstream record used to throw, and the blanket catch
+// in fetchDynamicModels turned that into ZERO advertised models — one dup wiped
+// out the whole provider instead of just the dup.
+test("duplicate upstream model records are collapsed, not fatal", () => {
+	const profiles = credentialProfiles(config);
+	const { models } = expandModels([
+		{ id: "opencode/gpt-5.6-sol", name: "Sol" },
+		{ id: "opencode/gpt-5.6-sol", name: "Sol" },
+		{ id: "opencode/other-model", name: "Other" },
+	], profiles);
+	assert.deepEqual(models.map((m) => m.id), [
+		"opencode/gpt-5.6-sol@account1", "opencode/gpt-5.6-sol@account2", "opencode/gpt-5.6-sol@account3",
+		"opencode/other-model@account1", "opencode/other-model@account2", "opencode/other-model@account3",
+	]);
+});
+
 test("invalid or duplicate profile IDs are rejected; status never contains key value", () => {
 	assert.throws(() => credentialProfiles({ x: { credentials: [{ id: "a", apiKeyEnv: "KEY" }, { id: "a", apiKeyEnv: "KEY2" }] } }), /duplicate/);
 	assert.throws(() => credentialProfiles({ x: { credentials: [{ id: "a@b", apiKeyEnv: "KEY" }] } }), /invalid/);

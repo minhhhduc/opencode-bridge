@@ -39,7 +39,12 @@ export function credentialProfiles(providers = {}) {
 export function expandModels(models, profiles) {
 	const descriptors = new Map();
 	const output = [];
+	const emitted = new Set();
 	for (const model of models) {
+		// One duplicate upstream record (a provider listed twice, a repeated table
+		// row) must not take down every other model: emit it once and move on.
+		if (emitted.has(model.id)) continue;
+		emitted.add(model.id);
 		const slash = model.id.indexOf("/");
 		const providerID = model.id.slice(0, slash);
 		const modelID = model.id.slice(slash + 1);
@@ -49,7 +54,6 @@ export function expandModels(models, profiles) {
 			// Encode the complete upstream model ID so @, %, and / cannot collide
 			// with the credential suffix or another upstream model name.
 			const id = `${providerID}/${encodeURIComponent(modelID)}@${profile.id}`;
-			if (descriptors.has(id)) throw new Error(`duplicate bridge model ID: ${id}`);
 			const descriptor = { ompModelId: id, providerID, modelID, credentialId: profile.id, credentialSource: profile.apiKeyEnv };
 			descriptors.set(id, descriptor);
 			output.push({ ...model, id, name: `${model.name} [${profile.id}]` });
@@ -79,6 +83,10 @@ export function resolveProfileModel(model, descriptors, profiles) {
 	const providerID = id.split("/")[0];
 	if (profiles.has(providerID)) {
 		// OMP can serve cached dynamic model configs without calling discovery.
+		// An un-suffixed id here is a pre-upgrade cache entry, not a corrupt one:
+		// it must keep working on the default client, exactly as it did before
+		// profiles existed, instead of failing until the user refreshes.
+		if (!id.includes("@")) return null;
 		const parsed = parseProfileModelId(id);
 		const profile = profiles.get(providerID).find((item) => item.id === parsed.credentialId);
 		if (!profile) throw new CapabilityError(`unknown credential profile: ${providerID}/${parsed.credentialId}`, { capability: "credential" });
