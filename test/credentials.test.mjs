@@ -29,9 +29,31 @@ test("one model and one key clone metadata and keep original model identity", ()
 	assert.equal(out[0].reasoning, true);
 	assert.deepEqual(out[0].cost, models[0].cost);
 	assert.deepEqual(descriptors.get(out[0].id), {
-		ompModelId: out[0].id, providerID: "opencode", modelID: "gpt-5.6-sol", credentialId: "account1", credentialSource: "TEST_OC_KEY_1",
+		ompModelId: out[0].id, providerID: "opencode", modelID: "gpt-5.6-sol", credentialId: "account1", credentialSource: "TEST_OC_KEY_1", apiKey: undefined,
 	});
 });
+
+// A profile may carry its key literally in the gitignored YAML instead of
+// naming an environment variable.
+test("a profile can carry the key inline in the file", () => {
+	const inline = credentialProfiles({ opencode: { credentials: [
+		{ id: "account1", apiKeyEnv: "TEST_OC_KEY_1", apiKey: "oc_sk_inline_value" },
+		{ id: "account2", apiKey: "oc_sk_other_value" },
+	] } });
+	const { models, descriptors } = expandModels(models0(), inline);
+	assert.equal(models.length, 2);
+	assert.equal(descriptors.get("opencode/gpt-5.6-sol@account1").apiKey, "oc_sk_inline_value");
+	assert.equal(descriptors.get("opencode/gpt-5.6-sol@account2").apiKey, "oc_sk_other_value");
+	// Status must confirm presence without ever echoing the value.
+	const status = credentialStatus(inline, {});
+	assert.deepEqual(status.map((s) => s.status), ["configured", "configured"]);
+	assert.deepEqual(status.map((s) => s.apiKeyEnv), ["(profile file)", "(profile file)"]);
+	assert.ok(!JSON.stringify(status).includes("oc_sk_inline_value"));
+	// A profile with neither form is rejected rather than silently unusable.
+	assert.throws(() => credentialProfiles({ x: { credentials: [{ id: "a" }] } }), /needs an apiKey or apiKeyEnv/);
+});
+
+const models0 = () => [{ id: "opencode/gpt-5.6-sol", name: "Sol", input: ["text"] }];
 
 test("three keys clone every discovered model; unconfigured provider stays unchanged", () => {
 	const profiles = credentialProfiles(config);

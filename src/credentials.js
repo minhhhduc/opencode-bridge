@@ -1,4 +1,6 @@
-// Profile metadata contains environment variable names, never API key values.
+// A profile names its key either literally (`apiKey`, kept in the gitignored
+// profile file) or by environment variable reference (`apiKeyEnv`). Nothing is
+// hardcoded in source; both forms end up in the same {id, …} shape.
 import { CapabilityError } from "./stream.js";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
@@ -24,14 +26,24 @@ export function credentialProfiles(providers = {}) {
 		const list = config?.credentials || [];
 		if (!Array.isArray(list)) throw new Error(`credentials for ${providerID} must be an array`);
 		const seen = new Set();
+		const out = [];
 		for (const item of list) {
-			if (!ID.test(item?.id || "") || !ENV.test(item?.apiKeyEnv || "") || seen.has(item.id)) {
+			if (!ID.test(item?.id || "") || seen.has(item.id)) {
 				throw new Error(`invalid or duplicate credential profile for ${providerID}`);
 			}
-			if (process.env[item.apiKeyEnv] && item.id === process.env[item.apiKeyEnv]) throw new Error(`credential profile ID for ${providerID} cannot equal its API key`);
+			const key = typeof item.apiKey === "string" ? item.apiKey : "";
+			// Either form is enough; apiKeyEnv is only required when there is no literal key.
+			if (item.apiKeyEnv !== undefined && !ENV.test(item.apiKeyEnv || "")) {
+				throw new Error(`invalid credential profile for ${providerID}`);
+			}
+			if (!key && !ENV.test(item.apiKeyEnv || "")) {
+				throw new Error(`credential profile ${providerID}/${item.id} needs an apiKey or apiKeyEnv`);
+			}
+			if (key && item.id === key) throw new Error(`credential profile ID for ${providerID} cannot equal its API key`);
 			seen.add(item.id);
+			out.push(key ? { id: item.id, apiKeyEnv: item.apiKeyEnv, apiKey: key } : { id: item.id, apiKeyEnv: item.apiKeyEnv });
 		}
-		if (list.length) profiles.set(providerID, list.map(({ id, apiKeyEnv }) => ({ id, apiKeyEnv })));
+		if (list.length) profiles.set(providerID, out);
 	}
 	return profiles;
 }
@@ -54,7 +66,7 @@ export function expandModels(models, profiles) {
 			// Encode the complete upstream model ID so @, %, and / cannot collide
 			// with the credential suffix or another upstream model name.
 			const id = `${providerID}/${encodeURIComponent(modelID)}@${profile.id}`;
-			const descriptor = { ompModelId: id, providerID, modelID, credentialId: profile.id, credentialSource: profile.apiKeyEnv };
+			const descriptor = { ompModelId: id, providerID, modelID, credentialId: profile.id, credentialSource: profile.apiKeyEnv, apiKey: profile.apiKey };
 			descriptors.set(id, descriptor);
 			output.push({ ...model, id, name: `${model.name} [${profile.id}]` });
 		}
@@ -90,11 +102,17 @@ export function resolveProfileModel(model, descriptors, profiles) {
 		const parsed = parseProfileModelId(id);
 		const profile = profiles.get(providerID).find((item) => item.id === parsed.credentialId);
 		if (!profile) throw new CapabilityError(`unknown credential profile: ${providerID}/${parsed.credentialId}`, { capability: "credential" });
-		return { ompModelId: id, providerID, modelID: parsed.modelID, credentialId: profile.id, credentialSource: profile.apiKeyEnv };
+		return { ompModelId: id, providerID, modelID: parsed.modelID, credentialId: profile.id, credentialSource: profile.apiKeyEnv, apiKey: profile.apiKey };
 	}
 	return null; // unconfigured providers keep their original model IDs and auth path
 }
 
 export function credentialStatus(profiles, env = process.env) {
-	return [...profiles].flatMap(([providerID, entries]) => entries.map(({ id, apiKeyEnv }) => ({ providerID, id, apiKeyEnv, status: env[apiKeyEnv] ? "configured" : "missing" })));
+	// Never echo the key itself — only whether one was found, and where it came from.
+	return [...profiles].flatMap(([providerID, entries]) => entries.map(({ id, apiKeyEnv, apiKey }) => ({
+		providerID,
+		id,
+		apiKeyEnv: apiKey ? "(profile file)" : apiKeyEnv,
+		status: apiKey || env[apiKeyEnv] ? "configured" : "missing",
+	})));
 }

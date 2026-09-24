@@ -29,8 +29,12 @@ export class OpenCodeClientPool {
 		const key = `${descriptor.providerID}\0${descriptor.credentialId}`;
 		let pending = this.entries.get(key);
 		if (!pending) {
-			const secret = process.env[descriptor.credentialSource];
-			if (!secret) throw new CapabilityError(`credential ${descriptor.providerID}/${descriptor.credentialId} is missing environment variable ${descriptor.credentialSource}`, { capability: "credential" });
+			// Literal key from the profile file, else the named environment variable.
+			const secret = descriptor.apiKey || process.env[descriptor.credentialSource];
+			if (!secret) {
+				const via = descriptor.credentialSource ? ` environment variable ${descriptor.credentialSource}` : "";
+				throw new CapabilityError(`credential ${descriptor.providerID}/${descriptor.credentialId} is missing its API key (no apiKey in the profile file, and no${via})`, { capability: "credential" });
+			}
 			this.secrets.add(secret);
 			pending = Promise.resolve().then(() => this.spawnServer(this.cfg, descriptor, secret, this.profiles)).catch((error) => {
 				throw new CapabilityError(this.sanitize(String(error?.message || error)).split(secret).join("***"), { capability: "credential" });
@@ -49,8 +53,8 @@ export class OpenCodeClientPool {
 	sanitize(message) {
 		let result = String(message);
 		for (const secret of this.secrets) result = result.split(secret).join("***");
-		for (const entries of this.profiles.values()) for (const { apiKeyEnv } of entries) {
-			const secret = process.env[apiKeyEnv];
+		for (const entries of this.profiles.values()) for (const { apiKeyEnv, apiKey } of entries) {
+			const secret = apiKey || process.env[apiKeyEnv];
 			if (secret) result = result.split(secret).join("***");
 		}
 		return result;

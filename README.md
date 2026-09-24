@@ -86,22 +86,20 @@ Settings live under the plugin's `omp.settings` (configure via OMP's plugin sett
 
 ### Multiple API keys for one OpenCode provider
 
-Edit the local `opencode-bridge.profiles.yml` (gitignored by this repo). It contains **references**, not key values:
+Edit the local `opencode-bridge.profiles.yml` (gitignored by this repo). Put the
+key straight in the file:
 
 ```yaml
 providers:
   opencode:
     credentials:
       - id: account1
-        apiKeyEnv: OPENCODE_KEY_1
+        apiKey: oc_sk_...
       - id: account2
-        apiKeyEnv: OPENCODE_KEY_2
-      - id: account3
-        apiKeyEnv: OPENCODE_KEY_3
+        apiKey: oc_sk_...
 ```
 
-Set the three environment variables in the process that launches OMP, and set
-`OPENCODE_BRIDGE_PROFILES_FILE` to the absolute path of this YAML file (or set
+Set `OPENCODE_BRIDGE_PROFILES_FILE` to the absolute path of this YAML file (or set
 `profilesFile` in the plugin settings). Restart OMP, then run `omp models refresh`.
 For example, a dynamically discovered `opencode/gpt-5.6-sol` becomes:
 
@@ -124,13 +122,18 @@ omp-opencode-bridge keys --profiles-file ./opencode-bridge.profiles.yml
 
 Each active profile starts one private OpenCode 2 server on loopback, reused for
 later requests. The bridge sets that server's `providers.<provider>.settings.apiKey`
-to an environment reference and removes inherited credential environment
-variables before passing the selected profile key. It isolates OpenCode's
+to the selected profile key and removes inherited credential environment
+variables so nothing else can supply one. It isolates OpenCode's
 data/config directory per process and protects the local
 server with a random password. This requires a key-based OpenCode provider that
 honors `settings.apiKey`; OAuth or multi-field cloud credentials are outside this
 feature. A profile key is read when its server starts, so restart OMP after
 changing it. Manual selection is supported; automatic key fallback is not.
+
+To keep keys out of the file entirely, name an environment variable instead —
+`apiKeyEnv: OPENCODE_KEY_1` reads the key from the environment, and a profile may
+carry both, with the literal `apiKey` winning. Either way `keys` reports only
+`configured`/`missing`, never the value.
 
 The plugin also accepts a `providers` object directly in `pi.settings` when the
 OMP host exposes structured plugin settings. `profilesFile` is the portable
