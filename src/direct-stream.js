@@ -64,7 +64,7 @@ export function mapTools(context) {
 	return out;
 }
 
-function buildBody(descriptor, provider, context, options, protocol) {
+function buildBody(descriptor, provider, context, options, protocol, model) {
 	const messages = mapMessages(context);
 	if (!messages.length) throw new CapabilityError("empty prompt: nothing to send to the direct provider", { capability: "inference" });
 	const body = { model: descriptor.modelID, messages, stream: true };
@@ -95,13 +95,20 @@ function buildBody(descriptor, provider, context, options, protocol) {
 	// `FT` throws on anything outside it, so by the time it reaches us it is a
 	// plain effort string). OpenRouter takes it as top-level `reasoning_effort`.
 	//
-	// It is sent only when the model advertised that exact level. OMP fabricates
-	// a default ladder for a model that declares none (e.g. deepseek-r1, whose
+	// The ladder comes from the model OMP resolved, not from our descriptor map:
+	// discovered models are appended to the provider list after `descriptors` is
+	// built, so a discovered model's id is not in that map and the cold-map
+	// fallback cannot know its ladder. OMP's own copy is the authoritative one
+	// here, precisely because it also covers models the map cannot describe.
+	//
+	// It is sent only for a level the model actually advertises. OMP fabricates a
+	// default ladder for a model that declares none (e.g. deepseek-r1, whose
 	// `supported_parameters` omits `reasoning_effort`), so a level can arrive
-	// from a picker the provider never offered; the descriptor's own copy of the
-	// advertised ladder is what decides. An unlisted level is dropped rather than
-	// forwarded, so the provider applies its own default instead of a 400.
-	if (typeof options?.reasoning === "string" && descriptor.efforts?.includes(options.reasoning)) {
+	// from a picker the provider never offered; an unlisted level is dropped
+	// rather than forwarded, so the provider applies its own default instead of
+	// a 400.
+	const efforts = model?.thinking?.efforts ?? descriptor.efforts;
+	if (typeof options?.reasoning === "string" && efforts?.includes(options.reasoning)) {
 		body.reasoning_effort = options.reasoning;
 	}
 	// Always send an explicit max_tokens. OMP does not set options.maxTokens for
@@ -132,7 +139,7 @@ export function makeDirectStreamSimple({ providers, resolve, env = process.env, 
 				const provider = providers.get(descriptor.providerID);
 				const protocol = PROTOCOLS[provider.protocol];
 				const apiKey = resolveApiKey(descriptor, env);
-				const body = buildBody(descriptor, provider, context, options, protocol);
+				const body = buildBody(descriptor, provider, context, options, protocol, model);
 
 				stream.push({ type: "start", partial });
 				await runDirect({

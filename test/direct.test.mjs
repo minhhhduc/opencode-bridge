@@ -729,6 +729,46 @@ test("every advertised effort reaches the wire as reasoning_effort", async () =>
 // The picker is not proof of support. OMP substitutes a default ladder for a model
 // that declares none (G2r), so a level the provider never advertised can still
 // arrive in `options.reasoning`; sending it would 400.
+// Regression: a DISCOVERED model is never in the descriptor map (discovery appends
+// to the provider list after the map is built), so the cold-map fallback resolves
+// it without a ladder. OMP still hands us the ladder it resolved, and that copy is
+// what the guard must use — otherwise every discovered model silently loses its
+// reasoning_effort. Found by running the real OMP picker against real OpenRouter.
+test("a discovered model, absent from the descriptor map, still sends its effort", async () => {
+	const server = await startProvider((_req, res) => ({ sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") }));
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [], discovery: { enabled: true } }) }, { env });
+		// Discovery output goes through the same normalization as a configured model.
+		const found = await discoverModels(providers.get("jev"), {
+			env,
+			fetchImpl: async () => ({ ok: true, json: async () => ({ data: [
+				{ id: "z-ai/glm-4.6", supported_parameters: ["reasoning", "reasoning_effort"],
+					reasoning: { supported_efforts: ["max", "high", "low", "medium", "minimal"] } },
+			] }) }),
+		});
+		// extension.js builds the descriptor map at registration, then discovery
+		// appends to the provider list. Mirror that order so the id is absent.
+		const { descriptors } = expandDirectModels(providers);
+		providers.get("jev").models = providers.get("jev").models.concat(found);
+		assert.equal(descriptors.has("jev/z-ai%2Fglm-4.6@account1"), false);
+
+		const call = makeDirectStreamSimple({
+			providers,
+			resolve: (model) => resolveDirectModel(model, descriptors, providers),
+			env,
+			fetchImpl: fetch,
+		});
+		// OMP passes the model it resolved, carrying the ladder from the picker.
+		const model = { id: "jev/z-ai%2Fglm-4.6@account1", thinking: { mode: "effort", efforts: found[0].thinking.efforts } };
+		await run(call(model, { messages: [{ role: "user", content: "hi" }] }, { reasoning: "high" }));
+		assert.equal(server.requests.at(-1).body.reasoning_effort, "high");
+
+		// Still guarded: `xhigh` is a valid OMP level this model never advertised.
+		await run(call(model, { messages: [{ role: "user", content: "hi" }] }, { reasoning: "xhigh" }));
+		assert.equal("reasoning_effort" in server.requests.at(-1).body, false);
+	} finally { await server.close(); }
+});
+
 test("an effort the model never advertised is dropped, not rewritten", async () => {
 	const server = await startProvider((_req, res) => ({ sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") }));
 	try {
