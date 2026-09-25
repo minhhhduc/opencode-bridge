@@ -252,24 +252,104 @@ configuration path.
 
 ### Add a URL/API provider through OpenCode
 
-The plugin does not store API keys or hardcode an endpoint. For an OpenAI-compatible
-provider, configure it in OpenCode's `opencode.json`, then let the bridge discover it:
+### OpenRouter (or any OpenAI-compatible URL + key)
+
+OpenRouter is just an OpenAI-compatible URL, so it needs no plugin support —
+only two things in two different files. The **URL goes in OpenCode's config**
+(because OpenCode is what dials it); the **key goes in the bridge's profile
+file** (because that is what the bridge swaps per account).
+
+**1. Define the provider** in `~/.config/opencode/opencode.json`
+(`%USERPROFILE%\.config\opencode\opencode.json` on Windows; it may not exist
+yet — create it, and if you already have one, add to its `providers` object):
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "provider": {
+  "providers": {
+    "openrouter": {
+      "package": "@ai-sdk/openai-compatible",
+      "name": "OpenRouter",
+      "settings": {
+        "baseURL": "https://openrouter.ai/api/v1"
+      },
+      "models": {
+        "anthropic/claude-sonnet-4.5": { "name": "Claude Sonnet 4.5" },
+        "openai/gpt-5.6-sol": { "name": "GPT-5.6 Sol" }
+      }
+    }
+  }
+}
+```
+
+Three details that are easy to get wrong, all verified against OpenCode 2.0.12:
+
+- the key is **`providers`**, plural — there is no `provider` key (that spelling
+  is silently ignored);
+- the fields are **`package`** and **`settings`**, not `npm` / `options` — with
+  `npm`/`options` OpenCode drops your `baseURL` and `apiKey` and leaves a
+  provider that cannot authenticate;
+- the `models` map is **required** — OpenCode only exposes what you list, so the
+  bridge only discovers what you list. Copy the model IDs from
+  [openrouter.ai/models](https://openrouter.ai/models); they use `vendor/model`.
+
+**2. Add the key** to your credential file:
+
+```yaml
+providers:
+  openrouter:
+    credentials:
+      - id: account1
+        apiKey: sk-or-v1-...
+      - id: account2
+        apiKey: sk-or-v1-...
+```
+
+The `openrouter:` here is the **same name** as in `opencode.json` — that is how
+the bridge matches the URL config to the key. A name in one file but not the
+other will not work, and it looks like "no such model".
+
+**3. Refresh and use:**
+
+```
+omp models refresh
+omp models opencode-bridge
+# opencode-bridge/openrouter/anthropic%2Fclaude-sonnet-4.5@account1
+```
+
+Each account gets its own isolated server and its own key, so `@account1` and
+`@account2` are two different OpenRouter accounts. To mix providers, list them
+side by side in both files — `providers:` in YAML can hold `opencode:` and
+`openrouter:` together, and `providers` in JSON can hold both definitions.
+
+Do not put the key in `opencode.json`. The bridge starts a server per account and
+overwrites `settings.apiKey` with the selected profile's key, so a key in the
+OpenCode config would be ignored. Use `apiKeyEnv` in the profile file if you
+would rather keep the key out of YAML entirely.
+
+### Any other OpenAI-compatible endpoint
+
+The plugin does not store API keys or hardcode an endpoint. For any
+OpenAI-compatible provider, follow the OpenRouter recipe above with your own
+`baseURL` and `package`. For a provider OpenCode already knows, no config is
+needed at all — the bridge discovers it from `opencode auth login`, and you
+only add a profile file entry if you want multiple accounts for it.
+
+without a profile — the key then comes from OpenCode's own auth:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
     "my-provider": {
-      "npm": "@ai-sdk/openai-compatible",
+      "package": "@ai-sdk/openai-compatible",
       "name": "My Provider",
-      "options": {
+      "settings": {
         "baseURL": "https://example.com/v1",
         "apiKey": "{env:MY_PROVIDER_API_KEY}"
       },
       "models": {
-        "my-model": {
-          "name": "My Model"
-        }
+        "my-model": { "name": "My Model" }
       }
     }
   }
@@ -283,6 +363,11 @@ $env:MY_PROVIDER_API_KEY = "sk-..."
 opencode reload
 omp models refresh
 ```
+
+This form puts the key in the environment rather than a profile, so there is one
+credential and no `@account` suffix. Add a profile file entry (see
+[OpenRouter](#openrouter-or-any-openai-compatible-url--key) above) as soon as
+you want a second account.
 
 Use a project config at `opencode.json` for project-local settings, or the user's
 OpenCode config for global settings. Do not commit API keys or `.env` files.
