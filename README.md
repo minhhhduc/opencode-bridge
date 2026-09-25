@@ -51,32 +51,39 @@ Any request OpenCode cannot honor becomes a `CapabilityError` / stream `error` e
 
 ## Install
 
-As an OMP plugin:
+### 1. Get the plugin
+
+From npm:
 
 ```
 omp plugin install omp-opencode-bridge
 ```
 
-Or from this directory during development:
+From a local checkout (for development, or if the package is not published):
 
 ```
-omp plugin install .
+npm pack --pack-destination ~/.omp/plugins     # from the repo root
+cd ~/.omp/plugins && npm install
 ```
 
-Standalone CLI (audit + doctor without OMP):
+The second form is deliberate: it copies the plugin into
+`~/.omp/plugins/node_modules/` as real files. A symlink back to the checkout
+would make the installed plugin change whenever you edit the repo, and a
+`omp plugin install .` symlink fails outright on Windows (`EPERM`).
+
+Verify it registered:
 
 ```
-npm install -g omp-opencode-bridge
-omp-opencode-bridge doctor
+omp plugins                                  # → omp-opencode-bridge@1.0.0
 ```
 
-### First run
+### 2. Add your API keys
 
-Installing is all the setup there is. On first start the bridge creates
-`opencode-bridge.profiles.yml` next to the installed plugin (or in `~/.omp`) with
-your keys to fill in — nothing else to configure, no environment variables:
+The first time OMP starts the bridge it writes
+`opencode-bridge.profiles.yml` — next to the installed plugin, or in `~/.omp` —
+already filled in as a template:
 
-```
+```yaml
 providers:
   opencode:
     credentials:
@@ -84,20 +91,70 @@ providers:
         apiKey: sk-replace-me
 ```
 
-Add one entry per API key, then restart OMP and run `omp models refresh`. Every
-discovered model is then offered once per profile, e.g.
-`opencode-bridge/opencode/space-bunny-free@account1`.
+Put one entry per API key in the `apiKey` field and delete any you don't need.
+The file is created only if it does not already exist, and a read-only install
+directory is not an error — the bridge just runs unprofiled.
 
-Check what it found without exposing any key:
+If the file was not created, write it yourself at `~/.omp/opencode-bridge.profiles.yml`,
+or point elsewhere with `profilesFile` in the plugin settings (or the
+`OPENCODE_BRIDGE_PROFILES_FILE` environment variable). The lookup order is:
+
+1. `profilesFile` / `OPENCODE_BRIDGE_PROFILES_FILE` — explicit, always wins
+2. the installed plugin directory
+3. `~/.omp`
+4. the current working directory
+
+To keep keys out of the file entirely, name a variable instead:
+`apiKeyEnv: OPENCODE_KEY_1` reads the key from the environment.
+
+Check what the bridge found — this never prints a key value:
 
 ```
-omp-opencode-bridge keys      # → opencode/account1  configured
+omp-opencode-bridge keys
+# opencode/account1   configured
+# opencode/account2   missing
 ```
 
-Keys may also be omitted from the file and taken from the environment with
-`apiKeyEnv: OPENCODE_KEY_1` instead. The file is only ever written if it does not
-already exist, and an unwritable install directory is not an error — the bridge
-runs unprofiled.
+### 3. Refresh models and use them
+
+```
+omp models refresh
+omp models opencode-bridge
+```
+
+Every discovered model is offered once per profile:
+
+```
+opencode-bridge/opencode/space-bunny-free@account1
+opencode-bridge/opencode/space-bunny-free@account2
+```
+
+Then pick one in OMP, e.g. `omp --model opencode-bridge/opencode/space-bunny-free@account1`.
+Each profile runs its own isolated OpenCode server, so switching `@account1` /
+`@account2` switches credentials, and concurrent requests on different accounts
+never share one.
+
+### Updating
+
+Re-install the same way as step 1. Your `opencode-bridge.profiles.yml` lives in
+`~/.omp` (or the install dir) and is never touched by an update. Run
+`omp models refresh` afterwards if the model list looks stale.
+
+### Uninstall
+
+```
+cd ~/.omp/plugins && npm uninstall omp-opencode-bridge
+```
+
+Your profile file is left in place, so reinstalling restores your keys.
+
+### Standalone CLI (audit + doctor, no OMP needed)
+
+```
+npm install -g omp-opencode-bridge
+omp-opencode-bridge doctor
+omp-opencode-bridge keys
+```
 
 ## Configuration
 
@@ -111,28 +168,14 @@ Settings live under the plugin's `omp.settings` (configure via OMP's plugin sett
 | `discovery`    | boolean | `true`  |                  | Dynamically discover OpenCode providers/models. |
 | `inference`    | boolean | `true`  |                  | Forward inference through the session API. |
 | `timeoutMs`    | number  | `30000` |                  | Per-request timeout for OpenCode CLI/API calls. |
-| `profilesFile` | string  | unset   | `OPENCODE_BRIDGE_PROFILES_FILE` | YAML file containing provider-scoped credential profile IDs and environment variable names. |
+| `profilesFile` | string  | unset   | `OPENCODE_BRIDGE_PROFILES_FILE` | Credential profile YAML. Unset = auto-discover beside the plugin or in `~/.omp`. |
 
 ### Multiple API keys for one OpenCode provider
 
-Edit `opencode-bridge.profiles.yml`. It lives beside the **installed** plugin (or
-in `~/.omp`), not in a source checkout, so updating or reinstalling keeps your
-keys. Put the key straight in the file:
-
-```yaml
-providers:
-  opencode:
-    credentials:
-      - id: account1
-        apiKey: oc_sk_...
-      - id: account2
-        apiKey: oc_sk_...
-```
-
-Nothing else is needed: the plugin finds that file on its own. Set
-`profilesFile` in the plugin settings (or `OPENCODE_BRIDGE_PROFILES_FILE`) only to
-point somewhere else. Restart OMP, then run `omp models refresh`.
-For example, a dynamically discovered `opencode/gpt-5.6-sol` becomes:
+See [Install](#install) for how the file is created and where it lives. In short:
+it sits beside the installed plugin (or in `~/.omp`), never in a source
+checkout, so updating or reinstalling keeps your keys. A dynamically discovered
+`opencode/gpt-5.6-sol` becomes:
 
 ```
 opencode-bridge/opencode/gpt-5.6-sol@account1
@@ -281,7 +324,9 @@ Recognized source kinds: `directory`, `package` (registry name), `github` (`owne
 ## Troubleshooting
 
 - **`doctor` says "detected: no"** — `opencode` isn't on `PATH`; set `OPENCODE_BIN` or `opencodePath`. On Windows the bridge looks for the real `opencode.exe` under the npm global prefix and spawns it directly, because routing the `opencode.cmd` shim through `cmd.exe` makes it reject JSON request bodies.
-- **No models under `opencode-bridge`** — run `opencode auth login` for a provider, then `omp models refresh` (discovery results are cached for 24h). Check with `omp models opencode-bridge`.
+- **No models under `opencode-bridge`** — run `opencode auth login` for a provider, then `omp models refresh` (discovery results are cached for 24h). Check with `omp models opencode-bridge`. If `omp plugins` doesn't list the bridge at all, it was never installed correctly — see [Install](#install).
+- **`keys` says `missing`** — that profile's environment variable is unset, or its `apiKey` is still the `sk-replace-me` placeholder. `keys` never prints key values, so a wrong key still shows as `configured`; the real answer comes from the request.
+- **A profile request fails but the unprofiled one works** — the selected key is bad, expired, or not enabled for that provider. Try the same model without the `@profile` suffix.
 - **Inference returns a capability error** — you passed `tools`, `temperature`, `maxTokens`, image input, or a reasoning effort. All are refused by design; see the capability boundary above.
 - **Model list is stale** — OMP caches dynamic models for 24h; run `omp models refresh`.
 - **"did not go idle" / hangs** — the session never finished. `waitTimeoutMs` (120s default) bounds it; the error is reported rather than hung.
