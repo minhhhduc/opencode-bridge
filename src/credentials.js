@@ -42,7 +42,7 @@ export function resolveProfilesFile(explicit, env = process.env) {
 	return target;
 }
 
-const STARTER = `# opencode-bridge credential profiles.
+export const STARTER = `# opencode-bridge credential profiles.
 # One profile = one API key = one isolated OpenCode server, so concurrent
 # requests on different accounts never share a credential. Add as many as you
 # like; each discovered model is then offered once per profile as
@@ -159,10 +159,15 @@ export function resolveProfileModel(model, descriptors, profiles) {
 
 export function credentialStatus(profiles, env = process.env) {
 	// Never echo the key itself — only whether one was found, and where it came from.
-	return [...profiles].flatMap(([providerID, entries]) => entries.map(({ id, apiKeyEnv, apiKey }) => ({
-		providerID,
-		id,
-		apiKeyEnv: apiKey ? "(profile file)" : apiKeyEnv,
-		status: apiKey || env[apiKeyEnv] ? "configured" : "missing",
-	})));
+	// The starter template's literal is a placeholder, not a credential: reporting
+	// it as "configured" would tell the user their install works when it cannot.
+	return [...profiles].flatMap(([providerID, entries]) => entries.map(({ id, apiKeyEnv, apiKey }) => {
+		const value = apiKey || env[apiKeyEnv];
+		return {
+			providerID,
+			id,
+			apiKeyEnv: apiKey ? "(profile file)" : apiKeyEnv,
+			status: !value ? "missing" : value === "sk-replace-me" ? "placeholder" : "configured",
+		};
+	}));
 }

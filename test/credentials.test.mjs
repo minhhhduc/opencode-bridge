@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmdirSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmdirSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentialProfiles, expandModels, parseProfileModelId, resolveProfileModel, credentialStatus, loadCredentialProfiles } from "../src/credentials.js";
@@ -314,9 +314,33 @@ test("malformed OPENCODE_CONFIG_CONTENT does not break the profile config merge"
 	}
 });
 
-// A fresh install has no profile file anywhere. resolveProfilesFile must write
-// a commented starter — with no real key in it — so the user finds the file and
-// its exact shape, and the starter must not be mistaken for a working config.
+// `npm install <tarball>` in a directory that has no package.json walks UP to
+// the nearest project and installs THERE — leaving the store empty while npm
+// exits 0. On a fresh machine that wrote a stray C:\Users\<user>\package.json.
+// setup must create the store project itself, and verify the files landed.
+test("setup installs into the store, not an ancestor project", () => {
+	const home = mkdtempSync(join(tmpdir(), "omp-setup-"));
+	const store = join(home, ".omp", "plugins");
+	const manifest = join(store, "package.json");
+	try {
+		const r = spawnSync(process.execPath, ["src/cli.js", "setup", "--json", "--key", "account1=sk-test-setup"], {
+			cwd: process.cwd(), encoding: "utf8", timeout: 180000,
+			env: { ...process.env, HOME: home, USERPROFILE: home, OPENCODE_BRIDGE_PROFILES_FILE: join(home, "profiles.yml") },
+		});
+		assert.equal(r.status, 0, r.stderr);
+		// The store is a real npm project of its own, so npm cannot climb out.
+		assert.ok(existsSync(manifest), "setup created the store package.json");
+		assert.equal(JSON.parse(readFileSync(manifest, "utf8")).private, true);
+		// The plugin really is installed as files in the store.
+		assert.ok(existsSync(join(store, "node_modules", "omp-opencode-bridge", "package.json")), "plugin installed into the store");
+		// And the credentials landed in the file the user was pointed at.
+		assert.match(readFileSync(join(home, "profiles.yml"), "utf8"), /apiKey: sk-test-setup/);
+		// No key value is echoed back to stdout.
+		assert.ok(!r.stdout.includes("sk-test-setup"), "setup never prints a key value");
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
 test("a fresh install writes a commented starter file", async () => {
 	const { resolveProfilesFile, loadCredentialProfiles, credentialStatus } = await import("../src/credentials.js");
 	const pluginRoot = mkdtempSync(join(tmpdir(), "omp-starter-"));

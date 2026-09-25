@@ -62,7 +62,7 @@ function canSpawn(bin) {
  * abort so no orphan OpenCode process survives.
  * @returns {Promise<{code:number, stdout:string, stderr:string}>}
  */
-export function run(bin, args, { signal, timeoutMs = 30000, input, env } = {}) {
+export function run(bin, args, { signal, timeoutMs = 30000, input, env, cwd } = {}) {
 	return new Promise((resolve, reject) => {
 		let child;
 		let spawnBin = bin;
@@ -74,7 +74,7 @@ export function run(bin, args, { signal, timeoutMs = 30000, input, env } = {}) {
 			spawnArgs = ["/d", "/s", "/c", bin, ...args];
 		}
 		try {
-			child = spawn(spawnBin, spawnArgs, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env });
+			child = spawn(spawnBin, spawnArgs, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env, cwd });
 		} catch (e) {
 			return reject(wrapSpawnError(e, bin));
 		}

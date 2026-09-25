@@ -51,7 +51,33 @@ Any request OpenCode cannot honor becomes a `CapabilityError` / stream `error` e
 
 ## Install
 
-### 1. Get the plugin
+### One command
+
+```
+node src/cli.js setup .
+```
+
+That packs the plugin, installs it into `~/.omp/plugins/`, and writes the
+credential file. Pass your keys inline and it writes them for you:
+
+```
+node src/cli.js setup . --key account1=sk-... --key account2=sk-...
+```
+
+Then:
+
+```
+omp models refresh
+```
+
+With no `--key` it writes a commented template and you paste the keys in
+yourself. It never overwrites an existing credential file, so re-running it to
+update the plugin keeps your keys.
+
+<details>
+<summary>What it does, and the alternatives</summary>
+
+**1. Get the plugin**
 
 From npm:
 
@@ -59,17 +85,23 @@ From npm:
 omp plugin install omp-opencode-bridge
 ```
 
-From a local checkout (for development, or if the package is not published):
+From a local checkout (for development, or if the package is not published),
+`setup` is the short form of:
 
 ```
-npm pack --pack-destination ~/.omp/plugins     # from the repo root
+npm pack --pack-destination ~/.omp/plugins
 cd ~/.omp/plugins && npm install
 ```
 
-The second form is deliberate: it copies the plugin into
-`~/.omp/plugins/node_modules/` as real files. A symlink back to the checkout
-would make the installed plugin change whenever you edit the repo, and a
-`omp plugin install .` symlink fails outright on Windows (`EPERM`).
+`setup` also creates `~/.omp/plugins/package.json` if it is missing. That
+matters: `npm install <tarball>` in a directory with no `package.json` walks
+*up* to the nearest project and installs there instead — silently, with exit
+code 0 — leaving the store empty. `setup` makes the store a real npm project
+and then verifies the files actually landed.
+
+Copying files (rather than symlinking back to the checkout) is deliberate: a
+symlink would make the installed plugin change whenever you edit the repo, and
+`omp plugin install .` symlinks fail outright on Windows (`EPERM`).
 
 Verify it registered:
 
@@ -77,11 +109,11 @@ Verify it registered:
 omp plugins                                  # → omp-opencode-bridge@1.0.0
 ```
 
-### 2. Add your API keys
+**2. Add your API keys**
 
-The first time OMP starts the bridge it writes
-`opencode-bridge.profiles.yml` — next to the installed plugin, or in `~/.omp` —
-already filled in as a template:
+The credential file is `opencode-bridge.profiles.yml`, next to the installed
+plugin or in `~/.omp`. `setup` writes it for you; if the file was not created,
+write it yourself:
 
 ```yaml
 providers:
@@ -92,12 +124,10 @@ providers:
 ```
 
 Put one entry per API key in the `apiKey` field and delete any you don't need.
-The file is created only if it does not already exist, and a read-only install
-directory is not an error — the bridge just runs unprofiled.
-
-If the file was not created, write it yourself at `~/.omp/opencode-bridge.profiles.yml`,
-or point elsewhere with `profilesFile` in the plugin settings (or the
-`OPENCODE_BRIDGE_PROFILES_FILE` environment variable). The lookup order is:
+If the file was not created at all, write it at
+`~/.omp/opencode-bridge.profiles.yml`, or point elsewhere with `profilesFile` in
+the plugin settings (or the `OPENCODE_BRIDGE_PROFILES_FILE` environment
+variable). The lookup order is:
 
 1. `profilesFile` / `OPENCODE_BRIDGE_PROFILES_FILE` — explicit, always wins
 2. the installed plugin directory
@@ -112,15 +142,20 @@ Check what the bridge found — this never prints a key value:
 ```
 omp-opencode-bridge keys
 # opencode/account1   configured
-# opencode/account2   missing
+# opencode/account2   placeholder
 ```
 
-### 3. Refresh models and use them
+`placeholder` means the entry still holds the template's `sk-replace-me` — it
+is a key shape, not a key.
+
+**3. Refresh models and use them**
 
 ```
 omp models refresh
 omp models opencode-bridge
 ```
+
+</details>
 
 Every discovered model is offered once per profile:
 
@@ -136,9 +171,10 @@ never share one.
 
 ### Updating
 
-Re-install the same way as step 1. Your `opencode-bridge.profiles.yml` lives in
-`~/.omp` (or the install dir) and is never touched by an update. Run
-`omp models refresh` afterwards if the model list looks stale.
+Re-run `node src/cli.js setup .` from the checkout, or re-install the same way
+as step 1. Your `opencode-bridge.profiles.yml` lives in `~/.omp` (or the
+install dir) and is never touched by an update. Run `omp models refresh`
+afterwards if the model list looks stale.
 
 ### Uninstall
 
@@ -153,6 +189,7 @@ Your profile file is left in place, so reinstalling restores your keys.
 ```
 npm install -g omp-opencode-bridge
 omp-opencode-bridge doctor
+omp-opencode-bridge setup .
 omp-opencode-bridge keys
 ```
 
@@ -325,7 +362,8 @@ Recognized source kinds: `directory`, `package` (registry name), `github` (`owne
 
 - **`doctor` says "detected: no"** — `opencode` isn't on `PATH`; set `OPENCODE_BIN` or `opencodePath`. On Windows the bridge looks for the real `opencode.exe` under the npm global prefix and spawns it directly, because routing the `opencode.cmd` shim through `cmd.exe` makes it reject JSON request bodies.
 - **No models under `opencode-bridge`** — run `opencode auth login` for a provider, then `omp models refresh` (discovery results are cached for 24h). Check with `omp models opencode-bridge`. If `omp plugins` doesn't list the bridge at all, it was never installed correctly — see [Install](#install).
-- **`keys` says `missing`** — that profile's environment variable is unset, or its `apiKey` is still the `sk-replace-me` placeholder. `keys` never prints key values, so a wrong key still shows as `configured`; the real answer comes from the request.
+- **`keys` says `placeholder`** — the entry still holds the template's `sk-replace-me`; open the profile file and paste the real key. (`missing` means the `apiKeyEnv` variable is unset.)
+- **`setup` succeeds but `omp plugins` doesn't list the bridge** — the install landed in the wrong project. `setup` now creates `~/.omp/plugins/package.json` and verifies the files; run `omp-opencode-bridge setup .` again, or check for a stray `package.json` in a parent directory.
 - **A profile request fails but the unprofiled one works** — the selected key is bad, expired, or not enabled for that provider. Try the same model without the `@profile` suffix.
 - **Inference returns a capability error** — you passed `tools`, `temperature`, `maxTokens`, image input, or a reasoning effort. All are refused by design; see the capability boundary above.
 - **Model list is stale** — OMP caches dynamic models for 24h; run `omp models refresh`.
