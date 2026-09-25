@@ -34,7 +34,7 @@ test("one model + one key yields one model; two keys yield two independent ids",
 	assert.deepEqual(descriptors.get("jev/jev@account1"), {
 		source: "direct", ompModelId: "jev/jev@account1",
 		providerID: "jev", modelID: "jev", credentialId: "account1",
-		apiKeyEnv: "JEV_API_KEY_1", apiKey: undefined, maxTokens: 8192,
+		apiKeyEnv: "JEV_API_KEY_1", apiKey: undefined, maxTokens: 8192, efforts: undefined,
 	});
 
 	const two = directProviders({ jev: jev() }, { env });
@@ -69,6 +69,95 @@ test("capabilities map onto OMP's model descriptor", () => {
 	assert.equal(m.reasoning, true);
 	assert.equal(m.contextWindow, 200000);
 	assert.equal(m.maxTokens, 32000);
+});
+
+// Reasoning detection must come from the payload, never from the name. The name
+// heuristic this replaced missed 318 of OpenRouter's 328 reasoning models and
+// false-positived on cohere/command-r* (a retrieval model). Each case below is a
+// real record shape from the live catalog.
+test("discovery reads reasoning and its efforts from the payload, not the name", async () => {
+	const upstream = await startProvider((_req, res) => {
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ data: [
+			// Name says "command-r", API says not reasoning.
+			{ id: "cohere/command-r-plus-08-2024", supported_parameters: ["max_tokens"] },
+			// Name says nothing useful, API says reasoning with its own ladder.
+			{ id: "meta/muse-spark-1.1", supported_parameters: ["reasoning", "reasoning_effort"],
+				reasoning: { mandatory: true, supported_efforts: ["xhigh", "high", "medium", "low", "minimal"], default_effort: "medium" } },
+			{ id: "meta/muse-spark-1.2", supported_parameters: ["reasoning", "reasoning_effort"],
+				reasoning: { mandatory: true, supported_efforts: ["xhigh", "high", "medium", "low", "minimal"], default_effort: "medium" } },
+			// A wider ladder: this one really does accept `max`, so it must offer it.
+			{ id: "meta/muse-spark-1.3", supported_parameters: ["reasoning", "reasoning_effort"],
+				reasoning: { mandatory: true, supported_efforts: ["max", "xhigh", "high", "medium", "low", "minimal"], default_effort: "medium" } },
+			// Mandatory reasoner with no effort knob: real reasoning, no picker.
+			{ id: "deepseek/deepseek-r1", supported_parameters: ["include_reasoning", "reasoning"],
+				reasoning: { mandatory: true } },
+			// A name the old regex did match, still honoured via the payload.
+			{ id: "deepseek/deepseek-r1-distill-llama-70b", supported_parameters: ["reasoning"],
+				reasoning: { supported_efforts: ["low", "high"] } },
+			// A payload with no capability signal at all must not be guessed.
+			{ id: "vendor/opaque", supported_parameters: ["tools"] },
+		] }));
+	});
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: upstream.baseURL, models: [], discovery: { enabled: true } }) }, { env });
+		const extra = await discoverModels(providers.get("jev"), { env });
+		const by = (id) => extra.find((m) => m.id === id);
+
+		assert.equal(by("cohere/command-r-plus-08-2024").reasoning, false);
+		assert.equal(by("cohere/command-r-plus-08-2024").thinking, undefined);
+
+		// Every level the API advertised, ordered by OMP's canonical ladder
+		// (weakest first) exactly as OMP's own OpenRouter adapter would — not in
+		// the provider's strongest-first order.
+		assert.deepEqual(by("meta/muse-spark-1.1").thinking.efforts, ["minimal", "low", "medium", "high", "xhigh"]);
+		assert.deepEqual(by("meta/muse-spark-1.2").thinking.efforts, ["minimal", "low", "medium", "high", "xhigh"]);
+		// A wider ladder keeps `max`, which is only offered by models that have it.
+		assert.deepEqual(by("meta/muse-spark-1.3").thinking.efforts, ["minimal", "low", "medium", "high", "xhigh", "max"]);
+
+		// Reasoning true, no ladder: no `thinking` key at all. OMP replaces an
+		// empty efforts array with a fabricated default ladder (G2r), so omitting
+		// the key is the only way not to offer levels the API never advertised.
+		assert.equal(by("deepseek/deepseek-r1").reasoning, true);
+		assert.equal(by("deepseek/deepseek-r1").thinking, undefined);
+
+		// A gappy ladder keeps its gaps: a model advertising only low/high must
+		// not be given `medium`.
+		assert.deepEqual(by("deepseek/deepseek-r1-distill-llama-70b").thinking.efforts, ["low", "high"]);
+
+		assert.equal(by("vendor/opaque").reasoning, false);
+	} finally { await upstream.close(); }
+});
+
+test("a configured reasoning model with no efforts gets reasoning without a picker", () => {
+	const providers = directProviders({ jev: jev({ models: [{ id: "r1", capabilities: { reasoning: true } }] }) }, { env });
+	const m = expandDirectModels(providers).models[0];
+	assert.equal(m.reasoning, true);
+	assert.equal(m.thinking, undefined);
+});
+
+test("a configured model can override the effort list", () => {
+	const providers = directProviders({ jev: jev({ models: [{ id: "r1", capabilities: { reasoning: true, efforts: ["low", "high", "xhigh"] } }] }) }, { env });
+	assert.deepEqual(expandDirectModels(providers).models[0].thinking.efforts, ["low", "high", "xhigh"]);
+});
+
+test("configured efforts outside OMP's ladder are dropped, not passed through", () => {
+	const providers = directProviders({ jev: jev({ models: [{ id: "r1", capabilities: { reasoning: true, efforts: ["low", "turbo", "high"] } }] }) }, { env });
+	assert.deepEqual(expandDirectModels(providers).models[0].thinking.efforts, ["low", "high"]);
+});
+
+// The descriptor carries the advertised ladder, not the picker: it is what the
+// request path checks before sending `reasoning_effort`.
+test("the descriptor carries the advertised ladder, and nothing when there is none", () => {
+	const providers = directProviders({ jev: jev({ models: [
+		{ id: "r1", capabilities: { reasoning: true, efforts: ["low", "high"] } },
+		{ id: "r2", capabilities: { reasoning: true } },
+		{ id: "plain" },
+	] }) }, { env });
+	const { descriptors } = expandDirectModels(providers);
+	assert.deepEqual(descriptors.get("jev/r1@account1").efforts, ["low", "high"]);
+	assert.equal(descriptors.get("jev/r2@account1").efforts, undefined);
+	assert.equal(descriptors.get("jev/plain@account1").efforts, undefined);
 });
 
 test("config errors name the provider/credential and never the key", () => {
@@ -270,6 +359,32 @@ test("usage, finish reason, and reasoning map to OMP's done event", async () => 
 		assert.equal(done.usage.cacheRead, 3);
 		assert.equal(events.find((e) => e.type === "thinking_end").content, "thinking…");
 		assert.ok(events[0].partial.usage.cost, "the start event carries usage.cost");
+	} finally { await upstream.close(); }
+});
+
+// Effort must not change how the response is consumed: thinking, text, a tool
+// call, usage and finish_reason all still stream, and the body carries the level.
+test("a reasoning model with an effort still streams thinking, text, tools and usage", async () => {
+	const upstream = await startProvider(() => ({ sse: sse(
+		chunk({ reasoning_content: "thinking…" }),
+		chunk({ content: "hello" }),
+		chunk({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "read", arguments: '{"path":"a"}' } }] }),
+		chunk({}, { usage: { prompt_tokens: 5, completion_tokens: 2 } }),
+		chunk({}, { finish_reason: "tool_calls" }),
+		"[DONE]",
+	) }));
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: upstream.baseURL, models: [{ id: "r1", capabilities: { reasoning: true, efforts: ["low", "high"] } }] }) }, { env });
+		const events = await run(harness(providers)({ id: "jev/r1@account1" }, { messages: [{ role: "user", content: "hi" }] }, { reasoning: "high" }));
+
+		assert.equal(upstream.requests.at(-1).body.reasoning_effort, "high");
+		assert.equal(events.find((e) => e.type === "thinking_end").content, "thinking…");
+		assert.equal(events.find((e) => e.type === "text_end").content, "hello");
+		assert.equal(events.find((e) => e.type === "toolcall_end").toolCall.arguments.path, "a");
+		const done = events.at(-1);
+		assert.equal(done.reason, "toolUse");
+		assert.equal(done.usage.input, 5);
+		assert.equal(done.usage.output, 2);
 	} finally { await upstream.close(); }
 });
 
@@ -585,6 +700,78 @@ test("an explicit max_tokens is always sent, from the configured limit", async (
 		// An explicit caller value still wins over the configured default.
 		await run(harness(providers, { fetchImpl: fetch })({ id: "jev/jev@account1" }, { messages: [{ role: "user", content: "hi" }] }, { maxTokens: 512 }));
 		assert.equal(server.requests.at(-1).body.max_tokens, 512);
+	} finally { await server.close(); }
+});
+
+// A picker the user can move is worthless if the choice never reaches the API:
+// OMP hands the level over as `options.reasoning`, and the direct path used to
+// drop it, so every request ran at the provider's own default effort.
+test("every advertised effort reaches the wire as reasoning_effort", async () => {
+	const server = await startProvider((_req, res) => ({ sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") }));
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [{ id: "r1", capabilities: { reasoning: true, efforts: ["minimal", "low", "medium", "high", "xhigh", "max"] } }] }) }, { env });
+		const call = harness(providers, { fetchImpl: fetch });
+		const send = async (reasoning) => {
+			await run(call({ id: "jev/r1@account1" }, { messages: [{ role: "user", content: "hi" }] }, reasoning === null ? {} : { reasoning }));
+			return server.requests.at(-1).body;
+		};
+
+		for (const effort of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
+			assert.equal((await send(effort)).reasoning_effort, effort, `${effort} must reach the request body`);
+		}
+
+		// No effort chosen: omit the field rather than guess one, so the provider
+		// applies its own default.
+		assert.equal("reasoning_effort" in await send(null), false);
+	} finally { await server.close(); }
+});
+
+// The picker is not proof of support. OMP substitutes a default ladder for a model
+// that declares none (G2r), so a level the provider never advertised can still
+// arrive in `options.reasoning`; sending it would 400.
+test("an effort the model never advertised is dropped, not rewritten", async () => {
+	const server = await startProvider((_req, res) => ({ sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") }));
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [
+			{ id: "r1", capabilities: { reasoning: true, efforts: ["low", "medium", "high"] } },
+			// Mandatory reasoner with no ladder, like deepseek/deepseek-r1.
+			{ id: "r2", capabilities: { reasoning: true } },
+		] }) }, { env });
+		const call = harness(providers, { fetchImpl: fetch });
+		const send = async (id, reasoning) => {
+			await run(call({ id }, { messages: [{ role: "user", content: "hi" }] }, { reasoning }));
+			return server.requests.at(-1).body;
+		};
+
+		// `max` is valid OMP but absent from this model's ladder. It must not be
+		// silently turned into `high`, nor sent.
+		const body = await send("jev/r1@account1", "max");
+		assert.equal("reasoning_effort" in body, false);
+		assert.equal((await send("jev/r1@account1", "high")).reasoning_effort, "high");
+
+		// A model with no ladder accepts no effort at all.
+		assert.equal("reasoning_effort" in await send("jev/r2@account1", "high"), false);
+	} finally { await server.close(); }
+});
+
+// Effort is per-request, keys are per-credential, and neither may leak into the
+// other. Both requests are in flight at once against a single shared provider.
+test("concurrent requests keep their own key and their own effort", async () => {
+	// Answered on a delay so both requests are genuinely in flight together.
+	const server = await startProvider((_req, _res, i) =>
+		new Promise((r) => setTimeout(() => r({ sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") }), 15 + i)));
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [{ id: "r1", capabilities: { reasoning: true, efforts: ["low", "high"] } }] }) }, { env });
+		const call = harness(providers, { fetchImpl: fetch });
+		const req = (id, reasoning) => run(call({ id }, { messages: [{ role: "user", content: "hi" }] }, { reasoning }));
+
+		await Promise.all([req("jev/r1@account1", "high"), req("jev/r1@account2", "low")]);
+
+		const a = server.requests.find((r) => r.authorization === "Bearer k1");
+		const b = server.requests.find((r) => r.authorization === "Bearer k2");
+		assert.equal(a.body.reasoning_effort, "high", "account1 keeps key1 + high");
+		assert.equal(b.body.reasoning_effort, "low", "account2 keeps key2 + low");
+		assert.equal(process.env.JEV_API_KEY_1, undefined, "the key never leaked into process.env");
 	} finally { await server.close(); }
 });
 

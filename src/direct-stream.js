@@ -90,6 +90,20 @@ function buildBody(descriptor, provider, context, options, protocol) {
 	}
 	if (typeof options?.temperature === "number") body.temperature = options.temperature;
 	if (typeof options?.topP === "number") body.top_p = options.topP;
+	// OMP hands the picker's level over as `options.reasoning` (verified against
+	// omp 18.2.6: `J8` resolves the level against `model.thinking.efforts`, and
+	// `FT` throws on anything outside it, so by the time it reaches us it is a
+	// plain effort string). OpenRouter takes it as top-level `reasoning_effort`.
+	//
+	// It is sent only when the model advertised that exact level. OMP fabricates
+	// a default ladder for a model that declares none (e.g. deepseek-r1, whose
+	// `supported_parameters` omits `reasoning_effort`), so a level can arrive
+	// from a picker the provider never offered; the descriptor's own copy of the
+	// advertised ladder is what decides. An unlisted level is dropped rather than
+	// forwarded, so the provider applies its own default instead of a 400.
+	if (typeof options?.reasoning === "string" && descriptor.efforts?.includes(options.reasoning)) {
+		body.reasoning_effort = options.reasoning;
+	}
 	// Always send an explicit max_tokens. OMP does not set options.maxTokens for
 	// this provider, and an OpenAI-compatible gateway left to its own default
 	// reserves the model's full output ceiling (OpenRouter: 65536), which a

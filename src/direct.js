@@ -164,12 +164,14 @@ function normalizeModels(providerID, list) {
 			maxTokens: positive(item?.maxOutputTokens ?? item?.maxTokens, 8192, providerID, id, "maxOutputTokens"),
 		};
 		// `reasoning: true` alone gives OMP no effort list to offer, so the
-		// picker shows nothing to choose. `thinking.efforts` is the shape it
-		// actually reads (verified against omp 18.2.6), so that is what carries
-		// the capability; `reasoning` is kept for older hosts.
+		// picker shows a fabricated default instead of this model's real ladder
+		// (verified against omp 18.2.6: `G2r` substitutes one for an empty range).
+		// `thinking.efforts` is the field it actually reads; `reasoning` is kept
+		// for older hosts.
 		if (caps.reasoning === true) {
+			const efforts = effortsOf(item);
 			model.reasoning = true;
-			model.thinking = { efforts: effortsOf(item) };
+			model.thinking = efforts?.length ? { mode: "effort", efforts } : undefined;
 		} else {
 			model.reasoning = false;
 		}
@@ -208,6 +210,11 @@ export function expandDirectModels(providers) {
 					apiKeyEnv: credential.apiKeyEnv,
 					apiKey: credential.apiKey,
 					maxTokens: model.maxTokens,
+					// The provider's own ladder, carried to the request so
+					// `reasoning_effort` is only ever sent for a level this model
+					// advertised. OMP fabricates a picker for a model that declares
+					// no ladder, so the picker alone is not proof of support.
+					efforts: model.thinking?.efforts,
 				});
 				models.push({ ...model, id, name: `${model.name} [${credential.id}]` });
 			}
@@ -244,6 +251,7 @@ export function resolveDirectModel(model, descriptors, providers) {
 		apiKeyEnv: credential.apiKeyEnv,
 		apiKey: credential.apiKey,
 		maxTokens: configured?.maxTokens ?? 8192,
+		efforts: configured?.thinking?.efforts,
 	};
 }
 
@@ -309,13 +317,12 @@ export async function discoverModels(provider, { env = process.env, fetchImpl = 
 		if (typeof id !== "string" || !id.trim() || seen.has(id)) continue;
 		seen.add(id);
 		const arch = item?.architecture ?? {};
-		const reasoning = looksLikeReasoning(item);
 		extra.push({
 			id,
 			name: typeof item?.name === "string" && item.name ? item.name : id,
 			// `reasoning` alone yields no effort menu in OMP's picker;
 			// `thinking.efforts` is the field it reads.
-			...(reasoning ? { reasoning: true, thinking: { efforts: DEFAULT_EFFORTS } } : { reasoning: false }),
+			...thinkingOf(reasoningOf(item)),
 			// Only the modalities OMP understands; a video/audio input model
 			// still offers text, so it is usable rather than dropped.
 			input: (Array.isArray(arch.input_modalities) ? arch.input_modalities : ["text"]).includes("image")
@@ -330,30 +337,73 @@ export async function discoverModels(provider, { env = process.env, fetchImpl = 
 }
 
 /**
- * No /models endpoint advertises reasoning as a boolean, so infer it from what
- * the payload does say: an explicit instruct_type (OpenRouter sets e.g.
- * "deepseek-r1"), or a reasoning family in the name/id. Errs towards true only
- * for those explicit signals — a false positive hides nothing, while a false
- * negative silently drops the model's thinking from OMP's picker.
+ * OMP's canonical effort ladder, weakest first (`Uo` in omp 18.2.6). A provider
+ * advertises a subset of it, so membership is the only safe test.
  */
-const REASONING_ID = /(^|[/:-])((r|qwq|reasoner|reasoning|think(er)?|mag[uo]d|distill-r|sr|trl|exaone-deep|small-think|gpt-oss)([-_.]|$|\d))/i;
-const REASONING_TYPE = /reason|think|deepseek-r\d|qwq/i;
+const EFFORT_LADDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
-// Discovery is additive and must never fail on one odd record, so a bad limit
-// falls back instead of throwing the way config validation does.
+const effortsOf = (item) => {
+	const list = item?.capabilities?.efforts;
+	if (!Array.isArray(list)) return null;
+	return orderedEfforts(list);
+};
+
+/**
+ * Filter to the levels OMP knows, then order them by its canonical ladder.
+ *
+ * Order is NOT the provider's: OMP's own OpenRouter adapter (`TKr` in 18.2.6)
+ * does exactly this — `Uo.filter(e => supported.includes(e))` — so mirroring it
+ * is what makes our descriptors match the ones OMP would build itself, and keeps
+ * the picker weakest-first regardless of how the provider sorts its list.
+ * OpenRouter reports strongest-first; `max` before `high` reads as a descending
+ * menu here without a second, provider-specific sort.
+ *
+ * Deduplicated because a repeated level would render twice in the picker.
+ */
+function orderedEfforts(list) {
+	return list.filter((e, i) => typeof e === "string" && EFFORT_LADDER.includes(e) && list.indexOf(e) === i)
+		.sort((a, b) => EFFORT_LADDER.indexOf(a) - EFFORT_LADDER.indexOf(b));
+}
+
+/**
+ * Why a model is (or is not) reasoning-capable, from the payload a
+ * `GET /models` actually returns. OpenRouter answers with `supported_parameters`
+ * on every record: `"reasoning"` there means the endpoint accepts a reasoning
+ * knob, and the sibling `reasoning` object carries `supported_efforts` — the
+ * per-model levels it accepts. Measured over OpenRouter's full live catalog
+ * (460 models, 328 reasoning, 188 with a ladder) that field is exact, where a
+ * name/instruct_type heuristic missed 318 of the 328 and false-positived on
+ * `cohere/command-r*`, which is a retrieval model, not a reasoner.
+ *
+ * `null` means "this payload says nothing" — the caller must not guess, because
+ * a wrong `true` shows a picker whose levels the API then rejects.
+ */
+const reasoningOf = (item) => {
+	const params = item?.supported_parameters;
+	if (!Array.isArray(params)) return null;
+	if (!params.includes("reasoning")) return { reasoning: false };
+	const efforts = orderedEfforts(item?.reasoning?.supported_efforts ?? []);
+	// `mandatory: true` with no supported_efforts (e.g. deepseek/deepseek-r1, whose
+	// supported_parameters omits `reasoning_effort`) reasons on every request and
+	// takes no effort: real reasoning, no picker.
+	return { reasoning: true, efforts: efforts.length ? efforts : null };
+};
+
+/** Discovery is additive and must never fail on one odd record. */
 const safePositive = (v, fallback) =>
 	typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback;
 
-/** OMP's effort list for a reasoning model; overridable per model. */
-const DEFAULT_EFFORTS = ["minimal", "low", "medium", "high"];
-const effortsOf = (item) => {
-	const list = item?.capabilities?.efforts;
-	return Array.isArray(list) && list.length ? list.filter((e) => typeof e === "string") : DEFAULT_EFFORTS;
-};
-
-function looksLikeReasoning(item) {
-	const type = item?.architecture?.instruct_type;
-	if (typeof type === "string" && REASONING_TYPE.test(type)) return true;
-	const name = typeof item?.name === "string" ? item.name : "";
-	return REASONING_ID.test(item?.id ?? "") || REASONING_ID.test(name);
-}
+/**
+ * Render one discovery record as an OMP model descriptor's capability fields.
+ * `thinking.efforts` is the field OMP's picker actually reads (verified against
+ * omp 18.2.6), and OMP substitutes a fabricated default ladder for an empty or
+ * missing one — so a model with no advertised ladder gets NO `thinking` key. It
+ * is still `reasoning: true` and still usable; it just has no effort knob, which
+ * is what the provider said.
+ */
+const thinkingOf = (reasoning) =>
+	!reasoning?.reasoning
+		? { reasoning: false }
+		: reasoning.efforts
+			? { reasoning: true, thinking: { mode: "effort", efforts: reasoning.efforts } }
+			: { reasoning: true };

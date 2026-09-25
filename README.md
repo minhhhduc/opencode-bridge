@@ -452,9 +452,36 @@ It is not a display alias. The namespace is `direct/`, so it cannot collide with
 | `protocol` | `openai-chat` (POST `<baseURL>/chat/completions`) or `openai-responses` (POST `<baseURL>/responses`). Pick the one the endpoint actually speaks. |
 | `baseURL` | Must be `http(s)`; trailing slashes are trimmed. |
 | `models[].capabilities` | `streaming` / `tools` / `vision` / `reasoning`. A provider with `tools: false` refuses a tool turn instead of dropping the tools. |
+| `models[].capabilities.efforts` | Optional effort levels for a `reasoning: true` model, e.g. `[low, high, xhigh]`. Omitted means reasoning with no selectable effort. Levels must come from OMP's own ladder (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`); anything else is dropped, and the rest are ordered weakest-first. |
 | `credentials[].apiKeyEnv` | Read **per request**, so exporting the key after OMP started still works. |
 | `credentials[].apiKey` | Literal key, kept for backward compatibility. `apiKeyEnv` is preferred. |
 | `discovery.enabled` | Optional `GET <baseURL>/models` to *add* model ids. Failure is ignored and never removes your manual list. |
+
+### Reasoning and effort
+
+Reasoning capability comes from the provider's metadata, never from the model
+name — no `deepseek-r*` / `qwq` / `think` regex. Discovery reads two fields from
+each `GET /models` record:
+
+* `supported_parameters` containing `"reasoning"` → the model is a reasoning
+  model. A record that advertises nothing is left non-reasoning rather than
+  guessed, since a false positive shows a picker the API then rejects.
+* `reasoning.supported_efforts` → exactly the levels OMP offers for that model.
+  OMP shows only what the provider reported, and gaps are preserved (a model
+  advertising `["xhigh","high"]` gets no `medium`).
+
+A reasoning model that advertises no ladder is still a reasoning model and is
+still selectable — it just has no effort knob, because the provider said so.
+
+The level you pick is sent to the provider as `reasoning_effort`. A level the
+model never advertised is dropped rather than forwarded or rewritten, so the
+provider applies its own default instead of failing the request. With nothing
+selected, no effort is sent at all.
+
+Levels are ordered by OMP's canonical ladder rather than the provider's, matching
+what OMP's own OpenRouter adapter does. So `"none"` — which OpenRouter does
+report for some models — is not a selectable level, since OMP's ladder has no
+such rung.
 
 Keys are never logged, never placed in a model id, never returned in an error,
 and never written to `process.env`. Config errors name the provider and
