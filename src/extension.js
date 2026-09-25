@@ -144,21 +144,28 @@ function registerDirectProvider(pi, cfg, config, warn) {
 	const streamSimple = makeDirectStreamSimple({ providers, resolve: (model) => resolveDirectModel(model, descriptors, providers) });
 
 	// Optional /v1/models discovery. Purely additive and never destructive: a
-	// failure leaves the manual model list exactly as configured.
-	const withDiscovered = async (base) => {
-		const extra = [];
+	// failure leaves the manual model list exactly as configured. Discovered ids
+	// are appended to the provider's model list and then go through the same
+	// credential expansion as manual ones — otherwise a discovered model would
+	// have no @credential suffix and no key, and could not be selected.
+	const discovered = async () => {
+		const out = [];
 		for (const provider of providers.values()) {
-			extra.push(...await discoverModels(provider));
+			const found = await discoverModels(provider);
+			if (!found.length) continue;
+			provider.models = provider.models.concat(found);
+			out.push(...expandDirectModels(new Map([[provider.id, provider]])).models);
 		}
-		return base.concat(extra);
+		return out;
 	};
 
 	pi.registerProvider(DIRECT_PROVIDER, {
 		api: "direct-url-api",
 		...PLACEHOLDER,
 		async fetchDynamicModels() {
-			if (cfg.discovery === false) return expandDirectModels(providers).models;
-			return withDiscovered(expandDirectModels(providers).models);
+			const base = expandDirectModels(providers).models;
+			if (cfg.discovery === false) return base;
+			return base.concat(await discovered());
 		},
 		streamSimple,
 	});

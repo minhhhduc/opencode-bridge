@@ -293,7 +293,10 @@ export async function discoverModels(provider, { env = process.env, fetchImpl = 
 	const extra = [];
 	for (const item of list) {
 		const id = typeof item === "string" ? item : item?.id;
-		if (typeof id !== "string" || !id.trim() || id.includes("/") || seen.has(id)) continue;
+		// "/" is allowed: expandDirectModels percent-encodes the model id into
+		// the OMP id, so a vendor-prefixed id like "meta/muse-spark-1.3" is
+		// unambiguous. Only blank and duplicate ids are dropped.
+		if (typeof id !== "string" || !id.trim() || seen.has(id)) continue;
 		seen.add(id);
 		extra.push({
 			id,

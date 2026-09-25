@@ -419,7 +419,10 @@ test("discovery adds model ids and never removes the manual ones", async () => {
 	try {
 		const provider = directProviders({ jev: jev({ baseURL: upstream.baseURL, discovery: { enabled: true } }) }, { env }).get("jev");
 		const extra = await discoverModels(provider, { env });
-		assert.deepEqual(extra.map((m) => m.id), ["jev-turbo", "jev-mini"], "only valid, non-duplicate ids are added");
+		// "not-a-model/x" is a valid id: the model segment is percent-encoded into
+		// the OMP id, so a vendor-prefixed upstream id is unambiguous there. Only
+		// blanks and duplicates are dropped.
+		assert.deepEqual(extra.map((m) => m.id), ["jev-turbo", "not-a-model/x", "jev-mini"]);
 		assert.equal(upstream.requests[0].url, "/v1/models");
 		assert.equal(upstream.requests[0].authorization, "Bearer k1");
 	} finally { await upstream.close(); }
@@ -583,4 +586,38 @@ test("an explicit max_tokens is always sent, from the configured limit", async (
 		await run(harness(providers, { fetchImpl: fetch })({ id: "jev/jev@account1" }, { messages: [{ role: "user", content: "hi" }] }, { maxTokens: 512 }));
 		assert.equal(server.requests.at(-1).body.max_tokens, 512);
 	} finally { await server.close(); }
+});
+
+// A discovered id is useless unless it can be selected and carries a key, so it
+// must go through the same credential expansion as a manual model. Regression:
+// discovery previously appended raw ids, which had no @credential suffix and no
+// key, so the model could be listed but never called.
+test("a discovered model is selectable and infers with a credential", async () => {
+	const upstream = await startProvider((_req, res, i) => {
+		if (i === 0) {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(JSON.stringify({ data: [{ id: "meta/muse-spark-1.3" }] }));
+			return undefined;
+		}
+		return { sse: sse(chunk({ content: "DISCOVERED_OK" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") };
+	});
+	try {
+		const providers = directProviders({
+			jev: jev({ baseURL: upstream.baseURL, models: [], discovery: { enabled: true } }),
+		}, { env });
+		const extra = await discoverModels(providers.get("jev"), { env });
+		assert.deepEqual(extra.map((m) => m.id), ["meta/muse-spark-1.3"]);
+		providers.get("jev").models = providers.get("jev").models.concat(extra);
+
+		const { models, descriptors } = expandDirectModels(providers);
+		const id = "jev/meta%2Fmuse-spark-1.3@account1";
+		assert.ok(models.some((m) => m.id === id), `expected ${id} in ${models.map((m) => m.id).join(", ")}`);
+
+		const events = await run(harness(providers, { fetchImpl: fetch })({ id }, { messages: [{ role: "user", content: "hi" }] }, {}));
+		assert.equal(events.find((e) => e.type === "text_end").content, "DISCOVERED_OK");
+		// The upstream model id is un-encoded again on the wire, and the
+		// credential is attached.
+		assert.equal(upstream.requests[1].body.model, "meta/muse-spark-1.3");
+		assert.equal(upstream.requests[1].authorization, "Bearer k1");
+	} finally { await upstream.close(); }
 });
