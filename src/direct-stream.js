@@ -127,7 +127,8 @@ function buildBody(descriptor, provider, context, options, protocol) {
 /**
  * Build the OMP `streamSimple` handler for the direct provider. `resolve(model)`
  * yields a descriptor, or null for an id that is not a configured direct model.
- * The key is resolved inside the request, from that descriptor alone.
+ * It may be async (see the shared-discovery resolver in extension.js). The key
+ * is resolved inside the request, from that descriptor alone.
  */
 export function makeDirectStreamSimple({ providers, resolve, env = process.env, fetchImpl = fetch, timeoutMs = 300000 }) {
 	return function streamSimple(model, context, options = {}) {
@@ -137,7 +138,7 @@ export function makeDirectStreamSimple({ providers, resolve, env = process.env, 
 			// it and then dereferences usage.cost.
 			const partial = { role: "assistant", content: [], usage: zeroUsage() };
 			try {
-				const descriptor = resolve(model);
+				const descriptor = await resolve(model);
 				if (!descriptor) throw new CapabilityError(`not a configured direct model: ${model?.id}`, { capability: "inference" });
 				const provider = providers.get(descriptor.providerID);
 				const protocol = PROTOCOLS[provider.protocol];

@@ -251,6 +251,12 @@ export function resolveDirectModel(model, descriptors, providers) {
 		apiKeyEnv: credential.apiKeyEnv,
 		apiKey: credential.apiKey,
 		maxTokens: configured?.maxTokens ?? 8192,
+		// `efforts` is the provider's own ladder and the only thing allowed to
+		// authorize `reasoning_effort` on the wire — OMP fabricates a picker for a
+		// model that advertises no ladder, so the picker is never evidence. It reads
+		// `provider.models` live rather than a snapshot, which is what makes it
+		// correct for a discovered model: the resolver in extension.js populates
+		// that list before the first request, so a cold map is no longer a gap.
 		efforts: configured?.thinking?.efforts,
 	};
 }

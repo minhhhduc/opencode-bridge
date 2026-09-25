@@ -141,14 +141,21 @@ function registerDirectProvider(pi, cfg, config, warn) {
 	if (!providers.size) return; // nothing configured — not an error, just absent
 
 	const descriptors = expandDirectModels(providers).descriptors;
-	const streamSimple = makeDirectStreamSimple({ providers, resolve: (model) => resolveDirectModel(model, descriptors, providers) });
 
 	// Optional /v1/models discovery. Purely additive and never destructive: a
 	// failure leaves the manual model list exactly as configured. Discovered ids
 	// are appended to the provider's model list and then go through the same
 	// credential expansion as manual ones — otherwise a discovered model would
 	// have no @credential suffix and no key, and could not be selected.
-	const discovered = async () => {
+	//
+	// Memoized and shared with the resolver below, because the two are reached
+	// from different points: OMP calls fetchDynamicModels on a cache miss, but it
+	// *serves* a cached model list for 24h afterwards — in a later process, where
+	// discovery never ran and `provider.models` is still just the manual list.
+	// discoverModels() de-duplicates against that list, so running it again is
+	// safe and yields exactly the models the first run missed.
+	let discovery = null;
+	const discovered = () => (discovery ??= (async () => {
 		const out = [];
 		for (const provider of providers.values()) {
 			const found = await discoverModels(provider);
@@ -157,7 +164,21 @@ function registerDirectProvider(pi, cfg, config, warn) {
 			out.push(...expandDirectModels(new Map([[provider.id, provider]])).models);
 		}
 		return out;
-	};
+	})());
+
+	// A cached model id can be inferred on without this process ever having
+	// discovered it, and then its ladder — the only thing allowed to authorize
+	// `reasoning_effort` — is missing. Populate the model list once, lazily, so
+	// the guard has provider truth to work from. A provider with discovery off
+	// costs nothing: discoverModels returns [] without a request.
+	let populated = false;
+	const streamSimple = makeDirectStreamSimple({
+		providers,
+		resolve: async (model) => {
+			if (!populated) { populated = true; await discovered(); }
+			return resolveDirectModel(model, descriptors, providers);
+		},
+	});
 
 	pi.registerProvider(DIRECT_PROVIDER, {
 		api: "direct-url-api",

@@ -804,8 +804,86 @@ test("an effort the model never advertised is dropped, not rewritten", async () 
 	} finally { await server.close(); }
 });
 
-// ── the wire guard ───────────────────────────────────────────────────────────
+// OMP caches a discovered model list for 24h and serves it from that cache in
+// later processes, which never call fetchDynamicModels. A model id can therefore
+// be inferred on by a process whose `provider.models` is still just the manual
+// list — and its ladder, the only thing allowed to authorize reasoning_effort,
+// is missing. Found by running the real OMP CLI against real OpenRouter: the
+// effort was selected and the request succeeded, but no reasoning_effort was
+// sent, because the cold resolver had no ladder to check it against.
 //
+// extension.js therefore shares one memoized discovery between fetchDynamicModels
+// and the resolver, and the resolver awaits it before the first request.
+test("a cached model id infers in a process that never discovered it", async () => {
+	// Index 0 answers GET /models; later requests are chat completions.
+	const server = await startProvider((req, res) => {
+		if (req.url.endsWith("/models")) {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(JSON.stringify({ data: [
+				{ id: "z-ai/glm-5.2", supported_parameters: ["reasoning", "reasoning_effort"],
+					reasoning: { supported_efforts: ["xhigh", "high"] } },
+				{ id: "qwen/qwen3.7-flash", supported_parameters: ["reasoning"], reasoning: {} },
+			] }));
+			return undefined;
+		}
+		return { sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") };
+	});
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [], discovery: { enabled: true } }) }, { env });
+		// A provider with discovery off must cost nothing on the inference path.
+		const off = directProviders({ jev: jev({ baseURL: server.baseURL, models: [{ id: "manual" }], discovery: { enabled: false } }) }, { env });
+
+		// The real registered shape, built by hand because extension.js wires the
+		// resolver internally: discovery is memoized and awaited once.
+		const wire = (map) => {
+			const descriptors = expandDirectModels(map).descriptors;
+			let populated = false;
+			let discovery = null;
+			const discovered = () => (discovery ??= (async () => {
+				for (const p of map.values()) {
+					const found = await discoverModels(p, { env });
+					if (found.length) p.models = p.models.concat(found);
+				}
+			})());
+			return makeDirectStreamSimple({
+				providers: map,
+				resolve: async (model) => {
+					if (!populated) { populated = true; await discovered(); }
+					return resolveDirectModel(model, descriptors, map);
+				},
+				env,
+				fetchImpl: fetch,
+			});
+		};
+
+		const call = wire(providers);
+		const send = (id, reasoning) =>
+			run(call({ id }, { messages: [{ role: "user", content: "hi" }] }, { reasoning }))
+				.then(() => server.requests.at(-1).body);
+
+		// Ladder discovered lazily, on the inference path, and honored.
+		assert.equal((await send("jev/z-ai%2Fglm-5.2@account1", "xhigh")).reasoning_effort, "xhigh");
+		// And still guarded: `medium` is not in this model's ladder.
+		assert.equal("reasoning_effort" in await send("jev/z-ai%2Fglm-5.2@account1", "medium"), false);
+		// A no-ladder reasoner discovered the same way sends nothing, whatever the
+		// picker showed.
+		assert.equal("reasoning_effort" in await send("jev/qwen%2Fqwen3.7-flash@account1", "high"), false);
+
+		// Discovery is a one-time cost, not a request on every turn.
+		const before = server.requests.length;
+		await send("jev/z-ai%2Fglm-5.2@account1", "high");
+		assert.equal(server.requests.length, before + 1, "only the completion was sent");
+
+		// With discovery off, a manually configured model still infers and no
+		// /models request is ever made.
+		const beforeOff = server.requests.length;
+		const offCall = wire(off);
+		await run(offCall({ id: "jev/manual@account1" }, { messages: [{ role: "user", content: "hi" }] }, {}));
+		assert.equal(server.requests.length, beforeOff + 1);
+	} finally { await server.close(); }
+});
+
+// ── the wire guard ───────────────────────────────────────────────────────────//
 // `reasoning_effort` is authorized by exactly one thing: the provider's own
 // ladder. OMP's rendering of that model is a separate concern and is never
 // consulted, because OMP fabricates a default ladder for a model that advertises
