@@ -90,7 +90,13 @@ function buildBody(descriptor, provider, context, options, protocol) {
 	}
 	if (typeof options?.temperature === "number") body.temperature = options.temperature;
 	if (typeof options?.topP === "number") body.top_p = options.topP;
-	if (typeof options?.maxTokens === "number") body.max_tokens = options.maxTokens;
+	// Always send an explicit max_tokens. OMP does not set options.maxTokens for
+	// this provider, and an OpenAI-compatible gateway left to its own default
+	// reserves the model's full output ceiling (OpenRouter: 65536), which a
+	// credit-limited account rejects with 402 before any content is generated.
+	// The configured maxOutputTokens is the ceiling we advertised to OMP, so it
+	// is also the most we may ask for.
+	body.max_tokens = typeof options?.maxTokens === "number" ? options.maxTokens : descriptor.maxTokens ?? 8192;
 	return body;
 }
 

@@ -34,7 +34,7 @@ test("one model + one key yields one model; two keys yield two independent ids",
 	assert.deepEqual(descriptors.get("jev/jev@account1"), {
 		source: "direct", ompModelId: "jev/jev@account1",
 		providerID: "jev", modelID: "jev", credentialId: "account1",
-		apiKeyEnv: "JEV_API_KEY_1", apiKey: undefined,
+		apiKeyEnv: "JEV_API_KEY_1", apiKey: undefined, maxTokens: 8192,
 	});
 
 	const two = directProviders({ jev: jev() }, { env });
@@ -562,4 +562,25 @@ test("doctor reports direct provider credentials without leaking keys", async ()
 		delete process.env.DIRECT_TEST_KEY;
 		unlinkSync(file); rmdirSync(dir);
 	}
+});
+
+// Regression: OMP sets no options.maxTokens for a custom provider, and an
+// OpenAI-compatible gateway left to its own default reserves the model's full
+// output ceiling (OpenRouter: 65536). A credit-limited account rejects that
+// with HTTP 402 before generating anything, so max_tokens must always be sent.
+test("an explicit max_tokens is always sent, from the configured limit", async () => {
+	const server = await startProvider(() => ({ sse: sse(chunk({ content: "ok" }, { finish_reason: "stop" }), "[DONE]") }));
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [{ id: "jev", name: "JEV", maxOutputTokens: 2048 }] }) }, { env });
+		const { descriptors } = expandDirectModels(providers);
+		assert.equal(descriptors.get("jev/jev@account1").maxTokens, 2048);
+
+		await run(harness(providers, { fetchImpl: fetch })({ id: "jev/jev@account1" }, { messages: [{ role: "user", content: "hi" }] }, {}));
+		assert.equal(server.requests.at(-1).body.max_tokens, 2048,
+			"must use the model's configured output limit, not the upstream default");
+
+		// An explicit caller value still wins over the configured default.
+		await run(harness(providers, { fetchImpl: fetch })({ id: "jev/jev@account1" }, { messages: [{ role: "user", content: "hi" }] }, { maxTokens: 512 }));
+		assert.equal(server.requests.at(-1).body.max_tokens, 512);
+	} finally { await server.close(); }
 });

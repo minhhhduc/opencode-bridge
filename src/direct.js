@@ -197,6 +197,7 @@ export function expandDirectModels(providers) {
 					credentialId: credential.id,
 					apiKeyEnv: credential.apiKeyEnv,
 					apiKey: credential.apiKey,
+					maxTokens: model.maxTokens,
 				});
 				models.push({ ...model, id, name: `${model.name} [${credential.id}]` });
 			}
@@ -223,6 +224,7 @@ export function resolveDirectModel(model, descriptors, providers) {
 	if (!credential) {
 		throw fail(`direct provider "${parsed.providerID}": unknown credential "${parsed.providerID}/${parsed.credentialId}"`);
 	}
+	const configured = providers.get(parsed.providerID).models.find((m) => m.id === parsed.modelID);
 	return {
 		source: "direct",
 		ompModelId: raw,
@@ -231,6 +233,7 @@ export function resolveDirectModel(model, descriptors, providers) {
 		credentialId: credential.id,
 		apiKeyEnv: credential.apiKeyEnv,
 		apiKey: credential.apiKey,
+		maxTokens: configured?.maxTokens ?? 8192,
 	};
 }
 
