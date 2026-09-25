@@ -473,10 +473,20 @@ each `GET /models` record:
 A reasoning model that advertises no ladder is still a reasoning model and is
 still selectable — it just has no effort knob, because the provider said so.
 
-The level you pick is sent to the provider as `reasoning_effort`. A level the
+The level you pick is sent to the provider as `reasoning_effort`, and the
+provider's own ladder is the **only** thing that can authorize it. A level the
 model never advertised is dropped rather than forwarded or rewritten, so the
 provider applies its own default instead of failing the request. With nothing
-selected, no effort is sent at all.
+selected — or on a model with no advertised ladder — no effort is sent at all.
+
+That last part matters because OMP fabricates a picker when a model declares no
+ladder: it substitutes `minimal,low,medium,high` for an empty range rather than
+showing nothing. Those are OMP's values, not the provider's, so they are ignored
+at the wire. The consequence is a known cosmetic limit — **UI may be imperfect,
+wire is correct**: a no-ladder reasoning model may show an effort control in OMP
+18.2.6 whose selection has no effect, because the model genuinely accepts no
+effort. The plugin API exposes no field to suppress that picker while keeping
+reasoning enabled.
 
 Levels are ordered by OMP's canonical ladder rather than the provider's, matching
 what OMP's own OpenRouter adapter does. So `"none"` — which OpenRouter does

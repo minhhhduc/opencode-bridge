@@ -727,13 +727,16 @@ test("every advertised effort reaches the wire as reasoning_effort", async () =>
 });
 
 // The picker is not proof of support. OMP substitutes a default ladder for a model
-// that declares none (G2r), so a level the provider never advertised can still
-// arrive in `options.reasoning`; sending it would 400.
-// Regression: a DISCOVERED model is never in the descriptor map (discovery appends
-// to the provider list after the map is built), so the cold-map fallback resolves
-// it without a ladder. OMP still hands us the ladder it resolved, and that copy is
-// what the guard must use — otherwise every discovered model silently loses its
-// reasoning_effort. Found by running the real OMP picker against real OpenRouter.
+// that advertises none (G2r), so a level the provider never offered can still
+// arrive in `options.reasoning`; forwarding it would send a parameter the model
+// has never accepted. OMP's copy of the ladder is a *presentation* concern and is
+// never consulted at the wire — only the provider's own metadata is.
+//
+// Regression: a DISCOVERED model is never in the registration-time descriptor map
+// (discovery appends to the provider list after the map is built), so its ladder
+// can only come from the cold-path re-derivation. That must still work, or every
+// discovered reasoning model silently loses its reasoning_effort. Found by
+// running the real OMP picker against real OpenRouter.
 test("a discovered model, absent from the descriptor map, still sends its effort", async () => {
 	const server = await startProvider((_req, res) => ({ sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") }));
 	try {
@@ -744,6 +747,8 @@ test("a discovered model, absent from the descriptor map, still sends its effort
 			fetchImpl: async () => ({ ok: true, json: async () => ({ data: [
 				{ id: "z-ai/glm-4.6", supported_parameters: ["reasoning", "reasoning_effort"],
 					reasoning: { supported_efforts: ["max", "high", "low", "medium", "minimal"] } },
+				// A reasoner that advertises no ladder: OMP will still show a picker.
+				{ id: "qwen/qwen3.7-flash", supported_parameters: ["reasoning"], reasoning: {} },
 			] }) }),
 		});
 		// extension.js builds the descriptor map at registration, then discovery
@@ -758,14 +763,19 @@ test("a discovered model, absent from the descriptor map, still sends its effort
 			env,
 			fetchImpl: fetch,
 		});
-		// OMP passes the model it resolved, carrying the ladder from the picker.
-		const model = { id: "jev/z-ai%2Fglm-4.6@account1", thinking: { mode: "effort", efforts: found[0].thinking.efforts } };
-		await run(call(model, { messages: [{ role: "user", content: "hi" }] }, { reasoning: "high" }));
-		assert.equal(server.requests.at(-1).body.reasoning_effort, "high");
+		const send = (id, model, reasoning) =>
+			run(call({ id, ...model }, { messages: [{ role: "user", content: "hi" }] }, { reasoning }))
+				.then(() => server.requests.at(-1).body);
 
+		// OMP passes the model it resolved, carrying the ladder it rendered.
+		const ladder = { thinking: { mode: "effort", efforts: found[0].thinking.efforts } };
+		assert.equal((await send("jev/z-ai%2Fglm-4.6@account1", ladder, "high")).reasoning_effort, "high");
 		// Still guarded: `xhigh` is a valid OMP level this model never advertised.
-		await run(call(model, { messages: [{ role: "user", content: "hi" }] }, { reasoning: "xhigh" }));
-		assert.equal("reasoning_effort" in server.requests.at(-1).body, false);
+		assert.equal("reasoning_effort" in await send("jev/z-ai%2Fglm-4.6@account1", ladder, "xhigh"), false);
+
+		// The picker OMP fabricates for a no-ladder model must not reach the wire,
+		// however confident that picker looks.
+		assert.equal("reasoning_effort" in await send("jev/qwen%2Fqwen3.7-flash@account1", {}, "high"), false);
 	} finally { await server.close(); }
 });
 
@@ -794,6 +804,50 @@ test("an effort the model never advertised is dropped, not rewritten", async () 
 	} finally { await server.close(); }
 });
 
+// ── the wire guard ───────────────────────────────────────────────────────────
+//
+// `reasoning_effort` is authorized by exactly one thing: the provider's own
+// ladder. OMP's rendering of that model is a separate concern and is never
+// consulted, because OMP fabricates a default ladder for a model that advertises
+// none — measured live, 136 of OpenRouter's 140 no-ladder reasoning models show
+// `minimal,low,medium,high`, none of which is provider evidence.
+//
+// The bug this locks down: the guard read `model.thinking.efforts ?? descriptor.efforts`,
+// so for a no-ladder model the FIRST source was OMP's fabrication, the `??` never
+// fell through to the provider truth, and the fabrication was re-admitted.
+test("reasoning_effort is authorized only by the provider's own ladder", async () => {
+	const server = await startProvider((_req, res) => ({ sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") }));
+	try {
+		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [
+			{ id: "ladder", capabilities: { reasoning: true, efforts: ["low", "medium", "high"] } },
+			// Reasoning, but the payload advertised no ladder at all. OMP shows a
+			// fabricated `minimal,low,medium,high` picker for both of these.
+			{ id: "noladder", capabilities: { reasoning: true } },
+			{ id: "notreasoning" },
+		] }) }, { env });
+		const call = harness(providers, { fetchImpl: fetch });
+		// `model` is what OMP resolved and hands back; `thinking` is its own copy.
+		const send = (id, thinking, reasoning) =>
+			run(call({ id, ...(thinking && { thinking }) }, { messages: [{ role: "user", content: "hi" }] }, { reasoning }))
+				.then(() => server.requests.at(-1).body);
+		const FABRICATED = { mode: "effort", efforts: ["minimal", "low", "medium", "high"] };
+
+		// 1. provider ladder + supported level -> sent
+		assert.equal((await send("jev/ladder@account1", { mode: "effort", efforts: ["low", "medium", "high"] }, "medium")).reasoning_effort, "medium");
+		// 2. provider ladder + unsupported level -> dropped, never rewritten
+		assert.equal("reasoning_effort" in await send("jev/ladder@account1", { mode: "effort", efforts: ["low", "medium", "high"] }, "max"), false);
+		// 3. no provider ladder + OMP's fake `high` -> dropped
+		assert.equal("reasoning_effort" in await send("jev/noladder@account1", FABRICATED, "high"), false);
+		// 4. empty provider ladder + OMP's fake `minimal` -> dropped
+		//    (an empty configured list is normalized away to no ladder at all)
+		assert.equal("reasoning_effort" in await send("jev/noladder@account1", FABRICATED, "minimal"), false);
+		// 5. non-reasoning model + an OMP effort -> dropped
+		assert.equal("reasoning_effort" in await send("jev/notreasoning@account1", FABRICATED, "high"), false);
+		// ...and the non-reasoning model never gets one even if OMP omits `thinking`.
+		assert.equal("reasoning_effort" in await send("jev/notreasoning@account1", undefined, "high"), false);
+	} finally { await server.close(); }
+});
+
 // Effort is per-request, keys are per-credential, and neither may leak into the
 // other. Both requests are in flight at once against a single shared provider.
 test("concurrent requests keep their own key and their own effort", async () => {
@@ -801,16 +855,29 @@ test("concurrent requests keep their own key and their own effort", async () => 
 	const server = await startProvider((_req, _res, i) =>
 		new Promise((r) => setTimeout(() => r({ sse: sse(chunk({ content: "ok" }, {}), chunk({}, { finish_reason: "stop" }), "[DONE]") }), 15 + i)));
 	try {
-		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [{ id: "r1", capabilities: { reasoning: true, efforts: ["low", "high"] } }] }) }, { env });
+		const providers = directProviders({ jev: jev({ baseURL: server.baseURL, models: [
+			{ id: "r1", capabilities: { reasoning: true, efforts: ["low", "high"] } },
+			{ id: "r2", capabilities: { reasoning: true } },
+		] }) }, { env });
 		const call = harness(providers, { fetchImpl: fetch });
-		const req = (id, reasoning) => run(call({ id }, { messages: [{ role: "user", content: "hi" }] }, { reasoning }));
+		// OMP's fabricated picker for r2, to prove a neighbour's capability (or
+		// lack of it) cannot leak across a concurrent request.
+		const FABRICATED = { mode: "effort", efforts: ["minimal", "low", "medium", "high"] };
+		const req = (id, thinking, reasoning) =>
+			run(call({ id, ...(thinking && { thinking }) }, { messages: [{ role: "user", content: "hi" }] }, { reasoning }));
 
-		await Promise.all([req("jev/r1@account1", "high"), req("jev/r1@account2", "low")]);
+		await Promise.all([
+			req("jev/r1@account1", { mode: "effort", efforts: ["low", "high"] }, "high"),
+			req("jev/r1@account2", { mode: "effort", efforts: ["low", "high"] }, "low"),
+			req("jev/r2@account1", FABRICATED, "high"),
+		]);
 
-		const a = server.requests.find((r) => r.authorization === "Bearer k1");
-		const b = server.requests.find((r) => r.authorization === "Bearer k2");
-		assert.equal(a.body.reasoning_effort, "high", "account1 keeps key1 + high");
-		assert.equal(b.body.reasoning_effort, "low", "account2 keeps key2 + low");
+		const sent = (key) => server.requests.find((r) => r.authorization === `Bearer ${key}`)?.body;
+		assert.equal(sent("k1").reasoning_effort, "high", "account1 keeps key1 + high");
+		assert.equal(sent("k2").reasoning_effort, "low", "account2 keeps key2 + low");
+		// r2's request carries the same key as r1/account1 and must still send nothing.
+		assert.equal(sent("k1").model, "r1");
+		assert.equal("reasoning_effort" in server.requests.find((r) => r.body.model === "r2").body, false);
 		assert.equal(process.env.JEV_API_KEY_1, undefined, "the key never leaked into process.env");
 	} finally { await server.close(); }
 });

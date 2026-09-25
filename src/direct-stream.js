@@ -64,7 +64,7 @@ export function mapTools(context) {
 	return out;
 }
 
-function buildBody(descriptor, provider, context, options, protocol, model) {
+function buildBody(descriptor, provider, context, options, protocol) {
 	const messages = mapMessages(context);
 	if (!messages.length) throw new CapabilityError("empty prompt: nothing to send to the direct provider", { capability: "inference" });
 	const body = { model: descriptor.modelID, messages, stream: true };
@@ -92,22 +92,25 @@ function buildBody(descriptor, provider, context, options, protocol, model) {
 	if (typeof options?.topP === "number") body.top_p = options.topP;
 	// OMP hands the picker's level over as `options.reasoning` (verified against
 	// omp 18.2.6: `J8` resolves the level against `model.thinking.efforts`, and
-	// `FT` throws on anything outside it, so by the time it reaches us it is a
-	// plain effort string). OpenRouter takes it as top-level `reasoning_effort`.
+	// `FT` throws on anything outside it). OpenRouter takes it as top-level
+	// `reasoning_effort`.
 	//
-	// The ladder comes from the model OMP resolved, not from our descriptor map:
-	// discovered models are appended to the provider list after `descriptors` is
-	// built, so a discovered model's id is not in that map and the cold-map
-	// fallback cannot know its ladder. OMP's own copy is the authoritative one
-	// here, precisely because it also covers models the map cannot describe.
+	// The ONLY authority for that field is `descriptor.efforts`, which is derived
+	// from the provider's own metadata — a configured `capabilities.efforts`, or
+	// discovery's `reasoning.supported_efforts` — for both map and cold-path
+	// descriptors. Deliberately NOT `model.thinking.efforts`: that is OMP's
+	// *presentation* copy, and for a model that advertises no ladder OMP
+	// fabricates one (`G2r` substitutes a default range for an empty one), so it
+	// re-admits exactly the levels this guard exists to reject. Confirmed live:
+	// 136 of OpenRouter's 140 no-ladder reasoning models show
+	// `minimal,low,medium,high` in the picker, and none of those is provider
+	// evidence.
 	//
-	// It is sent only for a level the model actually advertises. OMP fabricates a
-	// default ladder for a model that declares none (e.g. deepseek-r1, whose
-	// `supported_parameters` omits `reasoning_effort`), so a level can arrive
-	// from a picker the provider never offered; an unlisted level is dropped
-	// rather than forwarded, so the provider applies its own default instead of
-	// a 400.
-	const efforts = model?.thinking?.efforts ?? descriptor.efforts;
+	// A discovered model is never in the registration-time map, but that is not a
+	// gap: `resolveDirectModel`'s cold path re-derives from `provider.models`,
+	// which discovery has already appended to. UI may be imperfect; the wire is
+	// not.
+	const efforts = descriptor.efforts;
 	if (typeof options?.reasoning === "string" && efforts?.includes(options.reasoning)) {
 		body.reasoning_effort = options.reasoning;
 	}
@@ -139,7 +142,7 @@ export function makeDirectStreamSimple({ providers, resolve, env = process.env, 
 				const provider = providers.get(descriptor.providerID);
 				const protocol = PROTOCOLS[provider.protocol];
 				const apiKey = resolveApiKey(descriptor, env);
-				const body = buildBody(descriptor, provider, context, options, protocol, model);
+				const body = buildBody(descriptor, provider, context, options, protocol);
 
 				stream.push({ type: "start", partial });
 				await runDirect({
