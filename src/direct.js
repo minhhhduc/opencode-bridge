@@ -152,10 +152,9 @@ function normalizeModels(providerID, list) {
 		const input = caps.vision === true ? ["text", "image"] : ["text"];
 		for (const mod of input) if (!MODALITIES.includes(mod)) throw fail(`direct provider "${providerID}": unknown modality "${mod}"`);
 		seen.add(id);
-		out.push({
+		const model = {
 			id,
 			name: typeof item.name === "string" && item.name ? item.name : id,
-			reasoning: caps.reasoning === true,
 			input,
 			// OMP's model descriptor requires a cost object; a direct provider's
 			// pricing is unknown, so declare zero rather than omitting the field
@@ -163,7 +162,18 @@ function normalizeModels(providerID, list) {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: positive(item?.contextWindow, 128000, providerID, id, "contextWindow"),
 			maxTokens: positive(item?.maxOutputTokens ?? item?.maxTokens, 8192, providerID, id, "maxOutputTokens"),
-		});
+		};
+		// `reasoning: true` alone gives OMP no effort list to offer, so the
+		// picker shows nothing to choose. `thinking.efforts` is the shape it
+		// actually reads (verified against omp 18.2.6), so that is what carries
+		// the capability; `reasoning` is kept for older hosts.
+		if (caps.reasoning === true) {
+			model.reasoning = true;
+			model.thinking = { efforts: effortsOf(item) };
+		} else {
+			model.reasoning = false;
+		}
+		out.push(model);
 	}
 	return out;
 }
@@ -299,10 +309,13 @@ export async function discoverModels(provider, { env = process.env, fetchImpl = 
 		if (typeof id !== "string" || !id.trim() || seen.has(id)) continue;
 		seen.add(id);
 		const arch = item?.architecture ?? {};
+		const reasoning = looksLikeReasoning(item);
 		extra.push({
 			id,
 			name: typeof item?.name === "string" && item.name ? item.name : id,
-			reasoning: looksLikeReasoning(item),
+			// `reasoning` alone yields no effort menu in OMP's picker;
+			// `thinking.efforts` is the field it reads.
+			...(reasoning ? { reasoning: true, thinking: { efforts: DEFAULT_EFFORTS } } : { reasoning: false }),
 			// Only the modalities OMP understands; a video/audio input model
 			// still offers text, so it is usable rather than dropped.
 			input: (Array.isArray(arch.input_modalities) ? arch.input_modalities : ["text"]).includes("image")
@@ -330,6 +343,13 @@ const REASONING_TYPE = /reason|think|deepseek-r\d|qwq/i;
 // falls back instead of throwing the way config validation does.
 const safePositive = (v, fallback) =>
 	typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback;
+
+/** OMP's effort list for a reasoning model; overridable per model. */
+const DEFAULT_EFFORTS = ["minimal", "low", "medium", "high"];
+const effortsOf = (item) => {
+	const list = item?.capabilities?.efforts;
+	return Array.isArray(list) && list.length ? list.filter((e) => typeof e === "string") : DEFAULT_EFFORTS;
+};
 
 function looksLikeReasoning(item) {
 	const type = item?.architecture?.instruct_type;
