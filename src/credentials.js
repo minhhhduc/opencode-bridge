@@ -42,13 +42,23 @@ export function resolveProfilesFile(explicit, env = process.env) {
 	return target;
 }
 
-export const STARTER = `# opencode-bridge credential profiles.
-# One profile = one API key = one isolated OpenCode server, so concurrent
-# requests on different accounts never share a credential. Add as many as you
-# like; each discovered model is then offered once per profile as
-# \`opencode-bridge/<provider>/<model>@<id>\`.
+export const STARTER = `# opencode-bridge configuration.
+#
+# TWO INDEPENDENT WAYS TO ADD MODELS:
+#
+#   1. OpenCode models — discovered from your real OpenCode install. The keys
+#      below are passed to OpenCode, which routes every request itself.
+#   2. Direct URL models — configured right here. The plugin talks to the
+#      baseURL itself, with its own key. OpenCode never sees them, and they do
+#      NOT belong in ~/.config/opencode/opencode.json.
 #
 # Fill in the keys below, then restart OMP and run \`omp models refresh\`.
+#
+# ── 1. OpenCode credential profiles ──────────────────────────────────────────
+# One profile = one API key = one isolated OpenCode server, so concurrent
+# requests on different accounts never share a credential. Each discovered
+# OpenCode model is offered once per profile as
+# \`opencode-bridge/<provider>/<model>@<id>\`.
 providers:
   opencode:
     credentials:
@@ -56,17 +66,45 @@ providers:
         apiKey: sk-replace-me
       - id: account2
         apiKey: sk-replace-me
+
+# ── 2. Direct URL providers (never routed through OpenCode) ─────────────────
+# Selectors look like \`direct/<provider>/<model>@<credential>\`.
+# Prefer apiKeyEnv over a literal apiKey; the value is read per request.
+# directProviders:
+#   jev:
+#     name: JEV
+#     protocol: openai-chat        # or openai-responses
+#     baseURL: https://example.com/v1
+#     models:
+#       - id: jev
+#         name: JEV
+#         capabilities:
+#           streaming: true
+#           tools: true
+#           vision: false
+#           reasoning: true
+#         contextWindow: 200000
+#         maxOutputTokens: 32000
+#     credentials:
+#       - id: account1
+#         apiKeyEnv: JEV_API_KEY_1
+#       - id: account2
+#         apiKeyEnv: JEV_API_KEY_2
 `;
 
 export function loadCredentialProfiles(file) {
-	const contents = readFileSync(file, "utf8");
-	let config;
-	try { config = parse(contents); }
-	catch { throw new Error("invalid YAML profile file"); }
+	const { config } = loadConfigFile(file);
 	if (!config || typeof config !== "object" || Array.isArray(config) || !config.providers || typeof config.providers !== "object" || Array.isArray(config.providers)) {
 		throw new Error("profile file must contain a providers mapping");
 	}
 	return credentialProfiles(config.providers);
+}
+
+/** Parse the shared config file once. The ENOENT case is left to the caller. */
+export function loadConfigFile(file) {
+	const contents = readFileSync(file, "utf8");
+	try { return { config: parse(contents) }; }
+	catch { throw new Error("invalid YAML profile file"); }
 }
 
 export function credentialProfiles(providers = {}) {

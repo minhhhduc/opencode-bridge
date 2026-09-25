@@ -16,31 +16,54 @@
 
 import { OpenCodeClient } from "./opencode.js";
 import { makeStreamSimple } from "./stream.js";
-import { credentialProfiles, expandModels, resolveProfileModel, loadCredentialProfiles, resolveProfilesFile } from "./credentials.js";
+import { credentialProfiles, expandModels, resolveProfileModel, loadConfigFile, resolveProfilesFile } from "./credentials.js";
 import { OpenCodeClientPool } from "./client-pool.js";
+import { directProviders, directProvidersFrom, expandDirectModels, resolveDirectModel, discoverModels } from "./direct.js";
+import { makeDirectStreamSimple } from "./direct-stream.js";
+
+// `api` must be a CUSTOM name; built-ins are reserved and registerProvider
+// throws. Placeholders unlock OMP's dynamic discovery — every real request is
+// routed by streamSimple, so no OMP traffic ever reaches them and no
+// credential is copied into OMP.
+const PLACEHOLDER = { apiKey: "public", baseUrl: "https://opencode.ai/zen/v1" };
+const DIRECT_PROVIDER = "direct";
 
 export default function activate(pi) {
 	const cfg = readSettings(pi);
 	if (cfg.enabled === false) return;
+	const warn = (m) => (pi?.logger?.warn ?? pi?.log?.warn)?.(m);
+
+	// The profile file holds BOTH kinds of config: `providers:` (OpenCode
+	// credential profiles) and `directProviders:` (baseURL providers). It is
+	// parsed exactly once and both loaders read from the result, so one broken
+	// file produces one warning rather than one per source.
+	let config = null;
+	try { config = loadConfigFile(resolveProfilesFile(cfg.profilesFile)).config; }
+	catch (e) {
+		// ENOENT = "not configured yet", the normal state of a fresh install.
+		if (e?.code !== "ENOENT") {
+			warn(`opencode-bridge: invalid credential profile configuration, continuing without profiles: ${e.message}`);
+		}
+	}
+
+	registerDirectProvider(pi, cfg, config, warn);
 
 	const client = new OpenCodeClient(cfg);
 	// A bad profile file must not take the provider down: profiles are opt-in on
 	// top of the pre-existing single-credential path. Warn loudly, then keep the
-	// unprofiled bridge working instead of unregistering it. A missing file is
-	// simply "not configured yet" — that is the normal state of a fresh install.
+	// unprofiled bridge working instead of unregistering it.
 	let profiles = new Map();
 	try {
-		profiles = cfg.profilesFile === false
-			? credentialProfiles(cfg.providers)
-			: loadCredentialProfiles(resolveProfilesFile(cfg.profilesFile));
-	} catch (e) {
-		if (e?.code === "ENOENT") {
-			// nothing to load; the unprofiled bridge still works
-		} else {
-			(pi?.logger?.warn ?? pi?.log?.warn)?.(
-				`opencode-bridge: invalid credential profile configuration, continuing without profiles: ${e.message}`,
-			);
+		if (cfg.providers?.directProviders !== undefined) {
+			// Inline settings config: direct-only, so skip the file's `providers`.
+			profiles = credentialProfiles({});
+		} else if (cfg.profilesFile === false) {
+			profiles = credentialProfiles(cfg.providers);
+		} else if (config?.providers) {
+			profiles = credentialProfiles(config.providers);
 		}
+	} catch (e) {
+		warn(`opencode-bridge: invalid credential profile configuration, continuing without profiles: ${e.message}`);
 	}
 	const pool = new OpenCodeClientPool(cfg, profiles);
 	let descriptors = new Map();
@@ -89,6 +112,56 @@ export default function activate(pi) {
 		const msg = `opencode-bridge: registerProvider failed: ${e.message}`;
 		(pi?.logger?.warn ?? pi?.log?.warn)?.(msg);
 	}
+}
+
+/**
+ * Register the SECOND, independent model source: direct-URL providers.
+ *
+ * Configured only in the bridge's own profile file, discovered only from that
+ * file (never from OpenCode, never from `/api/provider`), and inferred by
+ * talking straight to the configured baseURL. Registers under its own provider
+ * name, so its selectors are `direct/<provider>/<model>@<credential>` and cannot
+ * collide with the OpenCode bridge's `opencode-bridge/...`.
+ *
+ * A malformed or absent direct config must never take the OpenCode bridge down
+ * with it, so failures warn and skip this provider only.
+ */
+function registerDirectProvider(pi, cfg, config, warn) {
+	let providers;
+	try {
+		// settings.providers.directProviders is an escape hatch; the profile
+		// file's top-level `directProviders:` is the documented home.
+		providers = cfg.providers?.directProviders !== undefined
+			? directProviders(cfg.providers.directProviders, { checkEnv: true })
+			: directProvidersFrom(config);
+	} catch (e) {
+		warn(`opencode-bridge: invalid direct provider configuration, direct providers disabled: ${e.message}`);
+		return;
+	}
+	if (!providers.size) return; // nothing configured — not an error, just absent
+
+	const descriptors = expandDirectModels(providers).descriptors;
+	const streamSimple = makeDirectStreamSimple({ providers, resolve: (model) => resolveDirectModel(model, descriptors, providers) });
+
+	// Optional /v1/models discovery. Purely additive and never destructive: a
+	// failure leaves the manual model list exactly as configured.
+	const withDiscovered = async (base) => {
+		const extra = [];
+		for (const provider of providers.values()) {
+			extra.push(...await discoverModels(provider));
+		}
+		return base.concat(extra);
+	};
+
+	pi.registerProvider(DIRECT_PROVIDER, {
+		api: "direct-url-api",
+		...PLACEHOLDER,
+		async fetchDynamicModels() {
+			if (cfg.discovery === false) return expandDirectModels(providers).models;
+			return withDiscovered(expandDirectModels(providers).models);
+		},
+		streamSimple,
+	});
 }
 
 function readSettings(pi) {

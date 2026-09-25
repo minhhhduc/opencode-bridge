@@ -1,9 +1,23 @@
 # omp-opencode-bridge
 
-An [OMP](https://oh-my-pi.dev) (Oh My Pi) plugin with two capabilities:
+An [OMP](https://oh-my-pi.dev) (Oh My Pi) plugin with three capabilities:
 
 1. **OpenCode model bridge** — detect a real [OpenCode](https://github.com/anomalyco/opencode) install, discover its providers/models dynamically (never hardcoded), and expose them in OMP as `opencode-bridge/<provider>/<model>`.
-2. **External-plugin audit** — a pre-install static validator for third-party OMP plugins: normalize the manifest, validate it, block path traversal, and surface declared capabilities before you install.
+2. **Direct URL providers** — register a model by its `baseURL` and key alone, in the plugin's own config, and infer over plain HTTP as `direct/<provider>/<model>@<credential>`. **No OpenCode involved at all.**
+3. **External-plugin audit** — a pre-install static validator for third-party OMP plugins: normalize the manifest, validate it, block path traversal, and surface declared capabilities before you install.
+
+The two model sources are fully independent:
+
+```
+OMP
+├── opencode-bridge/<provider>/<model>@<credential>
+│     → discovered from OpenCode → OpenCode's session API
+└── direct/<provider>/<model>@<credential>
+      → configured in the plugin's profile file → direct HTTP to baseURL
+```
+
+Either can be used without the other. OpenCode being down does not affect direct
+providers, and no direct provider is ever written to `opencode.json`.
 
 ## Capability boundary (read this first)
 
@@ -41,6 +55,18 @@ This bridge is built only on **verified** OpenCode surfaces — no invented APIs
 - **No sandbox.** OMP loads extensions as ESM **in-process with full host trust**. This plugin cannot contain another plugin at runtime. The audit command is therefore a *pre-install advisory*, not an enforcement boundary. See [DESIGN.md](DESIGN.md) and "Security model" below.
 
 Any request OpenCode cannot honor becomes a `CapabilityError` / stream `error` event — never a silent wrong answer.
+
+### Direct URL providers are a different path
+
+The boundaries above are specific to the OpenCode bridge. A direct provider is a
+plain OpenAI-compatible HTTP endpoint, so it has none of those limits: text and
+reasoning **stream incrementally** (`text_delta` / `thinking_delta` as each SSE
+frame arrives), **tool calling works** in both directions (OMP's tool schemas go
+upstream as OpenAI `tools`; returned `tool_calls` come back to OMP), and
+`temperature` / `topP` / `maxTokens` are forwarded. `usage` and `finish_reason`
+are reported; cancellation aborts the in-flight request. The only refusals are
+honest ones — a provider configured `supportsTools: false` will not pretend it
+accepts tools, and `openai-responses` will not silently reshaped a tool turn.
 
 ## Requirements
 
@@ -372,6 +398,75 @@ you want a second account.
 Use a project config at `opencode.json` for project-local settings, or the user's
 OpenCode config for global settings. Do not commit API keys or `.env` files.
 
+### The other way: a direct URL provider (no OpenCode at all)
+
+Everything above routes through OpenCode. You do **not** have to. A `directProviders:`
+entry in the same profile file makes the plugin dial the `baseURL` itself.
+
+> **Direct URL providers do NOT belong in `~/.config/opencode/opencode.json`.**
+> They are not OpenCode providers: no `opencode.json` entry, no `/api/provider`
+> entry, no OpenCode discovery, no OpenCode session. OpenCode never learns the
+> provider or its key exists. This is the whole point of the feature — so
+> putting one in `opencode.json` is both unnecessary and wrong.
+
+```yaml
+directProviders:
+  jev:
+    name: JEV
+    protocol: openai-chat          # or openai-responses
+    baseURL: https://<your-jev-host>/v1
+    models:
+      - id: jev
+        name: JEV
+        capabilities: { streaming: true, tools: true, vision: false, reasoning: true }
+        contextWindow: 200000
+        maxOutputTokens: 32000
+    credentials:
+      - id: account1
+        apiKeyEnv: JEV_API_KEY_1   # preferred: keeps the key out of the file
+      - id: account2
+        apiKeyEnv: JEV_API_KEY_2
+```
+
+```powershell
+$env:JEV_API_KEY_1 = "..."
+$env:JEV_API_KEY_2 = "..."
+omp models refresh
+omp --model direct/jev/jev@account1
+```
+
+Each `(model × credential)` pair becomes its own selectable OMP model:
+
+```
+direct/jev/jev@account1
+direct/jev/jev@account2
+```
+
+The `@accountN` suffix **is** the routing: it picks the credential resolved for
+that one request, and each request carries its own `Authorization: Bearer <key>`.
+It is not a display alias. The namespace is `direct/`, so it cannot collide with
+`opencode-bridge/`.
+
+| Field | Meaning |
+|---|---|
+| `protocol` | `openai-chat` (POST `<baseURL>/chat/completions`) or `openai-responses` (POST `<baseURL>/responses`). Pick the one the endpoint actually speaks. |
+| `baseURL` | Must be `http(s)`; trailing slashes are trimmed. |
+| `models[].capabilities` | `streaming` / `tools` / `vision` / `reasoning`. A provider with `tools: false` refuses a tool turn instead of dropping the tools. |
+| `credentials[].apiKeyEnv` | Read **per request**, so exporting the key after OMP started still works. |
+| `credentials[].apiKey` | Literal key, kept for backward compatibility. `apiKeyEnv` is preferred. |
+| `discovery.enabled` | Optional `GET <baseURL>/models` to *add* model ids. Failure is ignored and never removes your manual list. |
+
+Keys are never logged, never placed in a model id, never returned in an error,
+and never written to `process.env`. Config errors name the provider and
+credential but never the value:
+
+```
+Direct provider "jev": credential "jev/account2": environment variable JEV_API_KEY_2 is not set
+```
+
+Because this path never touches OpenCode, a direct provider keeps working when
+OpenCode is not installed, not running, or not authenticated.
+
 ## Diagnostics
 
 ```
@@ -433,6 +528,7 @@ Recognized source kinds: `directory`, `package` (registry name), `github` (`owne
 - OMP runs extensions in-process with the same privileges as OMP itself. There is **no runtime isolation** the bridge can impose. The audit is a **pre-install** gate you run by hand.
 - **Secrets are never printed.** All CLI/API error text and diagnostics pass through a redactor that masks authorization headers, api keys (`sk-…`), bearer tokens, cookies, passwords, and long opaque tokens.
 - **OpenCode owns its own auth.** The bridge shells out to `opencode api`, which authenticates to its own local server. No API keys are copied into OMP, and OMP's `apiKey` is unused by this provider.
+- **Direct providers carry their own key, per request.** A direct provider's credential is read at request time and used only to build that one request's `Authorization` header. It is never assigned to `process.env`, never placed in a model id, never sent to OpenCode or written to `opencode.json`, and never included in an error — an upstream that echoes the header back is redacted against the exact key that was sent.
 - **Path & source safety** in the audit: paths are canonicalized and traversal is rejected; source URLs are sanity-checked.
 - Child processes are killed (SIGKILL) on timeout or cancellation — no orphaned `opencode` processes.
 
@@ -447,6 +543,7 @@ Recognized source kinds: `directory`, `package` (registry name), `github` (`owne
 
 - **`doctor` says "detected: no"** — `opencode` isn't on `PATH`; set `OPENCODE_BIN` or `opencodePath`. On Windows the bridge looks for the real `opencode.exe` under the npm global prefix and spawns it directly, because routing the `opencode.cmd` shim through `cmd.exe` makes it reject JSON request bodies.
 - **No models under `opencode-bridge`** — run `opencode auth login` for a provider, then `omp models refresh` (discovery results are cached for 24h). Check with `omp models opencode-bridge`. If `omp plugins` doesn't list the bridge at all, it was never installed correctly — see [Install](#install).
+- **A direct provider vanishes from `omp models`** — it is missing from the model list when its `apiKeyEnv` variable is unset, because the profile file is validated at load. Export the key and re-run `omp models refresh`. `omp-opencode-bridge doctor` reports the same missing variables without printing their values.
 - **`keys` says `placeholder`** — the entry still holds the template's `sk-replace-me`; open the profile file and paste the real key. (`missing` means the `apiKeyEnv` variable is unset.)
 - **`setup` succeeds but `omp plugins` doesn't list the bridge** — the install landed in the wrong project. `setup` now creates `~/.omp/plugins/package.json` and verifies the files; run `omp-opencode-bridge setup .` again, or check for a stray `package.json` in a parent directory.
 - **A profile request fails but the unprofiled one works** — the selected key is bad, expired, or not enabled for that provider. Try the same model without the `@profile` suffix.

@@ -255,16 +255,22 @@ test("profile file resolves to the install, not the repo", async () => {
 test("a missing profile file leaves the bridge working", async () => {
 	const { default: activate } = await import("../src/extension.js");
 	const dir = mkdtempSync(join(tmpdir(), "omp-missing-"));
-	const old = process.env.OMP_PLUGIN_ROOT;
+	const oldRoot = process.env.OMP_PLUGIN_ROOT;
+	// Without this the test falls through to the developer's real ~/.omp profile
+	// file, so a machine with a configured `directProviders:` fails a test about
+	// missing files.
+	const oldFile = process.env.OPENCODE_BRIDGE_PROFILES_FILE;
 	try {
 		process.env.OMP_PLUGIN_ROOT = dir; // exists, but has no profiles file
+		process.env.OPENCODE_BRIDGE_PROFILES_FILE = join(dir, "definitely-absent.yml");
 		const registered = [];
 		const warnings = [];
 		activate({ settings: {}, registerProvider: (n) => registered.push(n), logger: { warn: (m) => warnings.push(m) } });
 		assert.deepEqual(registered, ["opencode-bridge"]);
 		assert.deepEqual(warnings, [], "a missing file is not a config error");
 	} finally {
-		if (old === undefined) delete process.env.OMP_PLUGIN_ROOT; else process.env.OMP_PLUGIN_ROOT = old;
+		if (oldRoot === undefined) delete process.env.OMP_PLUGIN_ROOT; else process.env.OMP_PLUGIN_ROOT = oldRoot;
+		if (oldFile === undefined) delete process.env.OPENCODE_BRIDGE_PROFILES_FILE; else process.env.OPENCODE_BRIDGE_PROFILES_FILE = oldFile;
 		rmdirSync(dir);
 	}
 });

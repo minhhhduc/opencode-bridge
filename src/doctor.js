@@ -2,6 +2,38 @@
 
 import { OpenCodeClient } from "./opencode.js";
 import { openEventStream } from "./sse.js";
+import { loadConfigFile, resolveProfilesFile } from "./credentials.js";
+import { directProvidersFrom } from "./direct.js";
+
+/**
+ * Direct providers are reported from config alone — no OpenCode involved, and
+ * not gated on OpenCode being detected. Values are never printed: only
+ * `configured` / `missing`, the same rule the OpenCode profiles follow.
+ */
+function reportDirectProviders(cfg) {
+	let config;
+	try { config = loadConfigFile(cfg.profilesFile ? resolveProfilesFile(cfg.profilesFile) : resolveProfilesFile(undefined)).config; }
+	catch { return []; } // absent or unparseable: nothing to report
+	let providers;
+	// checkEnv:false so a missing variable lists as `missing` instead of throwing.
+	try { providers = directProvidersFrom(config, { checkEnv: false }); } catch { return []; }
+	const out = [];
+	for (const [id, provider] of providers) {
+		for (const credential of provider.credentials) {
+			const key = credential.apiKey || process.env[credential.apiKeyEnv];
+			out.push({
+				provider: id,
+				credential: credential.id,
+				apiKeyEnv: credential.apiKey ? "(profile file)" : credential.apiKeyEnv,
+				protocol: provider.protocol,
+				baseURL: provider.baseURL,
+				models: provider.models.length,
+				status: key ? "configured" : "missing",
+			});
+		}
+	}
+	return out;
+}
 
 export async function doctor(cfg = {}, signal) {
 	const client = new OpenCodeClient(cfg);
@@ -13,6 +45,9 @@ export async function doctor(cfg = {}, signal) {
 		serverUrl: null,
 		providers: [],
 		models: 0,
+		// Filled before the OpenCode probes so a machine with only direct
+		// providers still gets a useful report.
+		directProviders: reportDirectProviders(cfg),
 		streaming: "unknown (not probed yet)",
 		toolCalling: "unsupported (OpenCode drives its own agent tools; caller schemas refused)",
 		reasoning: "content exposed; per-request effort unsupported (effort is a session-create model variant, not a prompt field)",
@@ -73,6 +108,10 @@ export function formatDoctor(r) {
 		`Streaming transport:  ${r.streaming}`,
 		`Tool calling:        ${r.toolCalling}`,
 		`Reasoning/effort:    ${r.reasoning}`,
+		...["", "Direct URL providers (no OpenCode involved):",
+			...(r.directProviders?.length
+				? r.directProviders.map((d) => `  ${d.provider}/${d.credential}@${d.apiKeyEnv}  ${d.protocol}  ${d.baseURL}  ${d.models} model(s)  ${d.status}`)
+				: ["  (none configured)"])],
 		...(r.errors.length ? ["", "Warnings:", ...r.errors.map((e) => `  - ${e}`)] : []),
 	].join("\n");
 }
