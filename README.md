@@ -326,10 +326,15 @@ providers:
   openrouter:
     credentials:
       - id: account1
-        apiKey: sk-or-v1-...
+        apiKeyEnv: OPENROUTER_KEY_1   # preferred: keeps the key out of the file
       - id: account2
-        apiKey: sk-or-v1-...
+        apiKeyEnv: OPENROUTER_KEY_2
 ```
+
+A literal `apiKey: sk-or-v1-...` also works and is convenient for a one-off, but
+it writes the key into a plaintext file. Prefer `apiKeyEnv` if the file may ever
+be backed up, shared, or committed. Either way the key is never logged, never put
+in a model id, and never returned in an error.
 
 The `openrouter:` here is the **same name** as in `opencode.json` — that is how
 the bridge matches the URL config to the key. A name in one file but not the
@@ -595,6 +600,7 @@ Recognized source kinds: `directory`, `package` (registry name), `github` (`owne
 - OpenCode's own tool calls (`session.tool.*`) are not forwarded as OMP tool-call events; OpenCode runs its agent tools internally and the bridge surfaces only reasoning and text.
 - Caller-supplied tool schemas, `temperature`, `maxTokens`, and image inputs are unsupported, as is per-request reasoning **effort** (reasoning *content* is supported).
 - Response extraction binds the shapes captured from a live OpenCode server (`oc_openapi.json`); a future schema change surfaces as a loud capability error, not a wrong answer.
+- **OMP fabricates an effort picker for a Direct reasoning model that advertises no `supported_efforts`.** Verified against the real OMP 18.2.6 CLI: 136 of OpenRouter's 140 such models render exactly `minimal,low,medium,high`. Those are OMP's values, not the provider's, so selecting one is a no-op — the wire stays correct and the model still reasons, but the control is misleading. `compat.supportsReasoningEffort: false` is the only descriptor field that suppresses it, and OMP reads it *only* for `openai-responses` apis, so a custom api has no way to hide it while keeping reasoning enabled. UI may be imperfect; the wire is not.
 - No runtime sandbox for third-party plugins (an OMP-core limitation, documented rather than faked).
 
 ## Development
