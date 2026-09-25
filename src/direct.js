@@ -298,16 +298,42 @@ export async function discoverModels(provider, { env = process.env, fetchImpl = 
 		// unambiguous. Only blank and duplicate ids are dropped.
 		if (typeof id !== "string" || !id.trim() || seen.has(id)) continue;
 		seen.add(id);
+		const arch = item?.architecture ?? {};
 		extra.push({
 			id,
-			name: id,
-			reasoning: false,
-			input: ["text"],
+			name: typeof item?.name === "string" && item.name ? item.name : id,
+			reasoning: looksLikeReasoning(item),
+			// Only the modalities OMP understands; a video/audio input model
+			// still offers text, so it is usable rather than dropped.
+			input: (Array.isArray(arch.input_modalities) ? arch.input_modalities : ["text"]).includes("image")
+				? ["text", "image"] : ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 128000,
-			maxTokens: 8192,
+			contextWindow: safePositive(item?.context_length, 128000),
+			maxTokens: safePositive(item?.top_provider?.max_completion_tokens, 8192),
 			discovered: true,
 		});
 	}
 	return extra;
+}
+
+/**
+ * No /models endpoint advertises reasoning as a boolean, so infer it from what
+ * the payload does say: an explicit instruct_type (OpenRouter sets e.g.
+ * "deepseek-r1"), or a reasoning family in the name/id. Errs towards true only
+ * for those explicit signals — a false positive hides nothing, while a false
+ * negative silently drops the model's thinking from OMP's picker.
+ */
+const REASONING_ID = /(^|[/:-])((r|qwq|reasoner|reasoning|think(er)?|mag[uo]d|distill-r|sr|trl|exaone-deep|small-think|gpt-oss)([-_.]|$|\d))/i;
+const REASONING_TYPE = /reason|think|deepseek-r\d|qwq/i;
+
+// Discovery is additive and must never fail on one odd record, so a bad limit
+// falls back instead of throwing the way config validation does.
+const safePositive = (v, fallback) =>
+	typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback;
+
+function looksLikeReasoning(item) {
+	const type = item?.architecture?.instruct_type;
+	if (typeof type === "string" && REASONING_TYPE.test(type)) return true;
+	const name = typeof item?.name === "string" ? item.name : "";
+	return REASONING_ID.test(item?.id ?? "") || REASONING_ID.test(name);
 }
